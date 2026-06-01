@@ -28,10 +28,16 @@ from app.embedding.text_utils import (
 
 print("Getting Data From")
 _MODEL = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu")
-_QDRANT_URL = getattr(settings, "QDRANT_URL", None) or os.getenv("QDRANT_URL")
-if not _QDRANT_URL:
-    raise ValueError("QDRANT_URL environment variable is missing")
-_CLIENT = QdrantClient(url=_QDRANT_URL)
+_QDRANT_HOST = getattr(settings, "QDRANT_HOST", "localhost")
+_QDRANT_PORT = getattr(settings, "QDRANT_PORT", 6333)
+_QDRANT_API_KEY = getattr(settings, "QDRANT_API_KEY", "")
+
+_CLIENT = QdrantClient(
+    host=_QDRANT_HOST,
+    port=_QDRANT_PORT,
+    api_key=_QDRANT_API_KEY if _QDRANT_API_KEY else None,
+    https=False
+)
 
 _COLLECTION_NAME = "matrix_mapping_wissen"
 _VECTOR_SIZE = 1024
