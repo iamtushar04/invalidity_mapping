@@ -77,9 +77,30 @@ Claim text:
                 elements = parsed.get("elements", [])
             except Exception as e:
                 raise ValueError(f"Failed to parse LLM response for claim {claim_id}: {e}")
-            # Clamp each weight to 0-100, no forced normalization
-            for el in elements:
-                el["weight"] = clamp_weight(el.get("weight", 0))
+            # Mathematically normalize weights using Largest Remainder Method so they sum to exactly 100 integers
+            raw_weights = [clamp_weight(el.get("weight", 0)) for el in elements]
+            total_weight = sum(raw_weights)
+            
+            if total_weight > 0:
+                exact_percentages = [(w / total_weight) * 100.0 for w in raw_weights]
+                integer_parts = [int(p) for p in exact_percentages]
+                remainders = [exact_percentages[i] - integer_parts[i] for i in range(len(elements))]
+                
+                missing_points = 100 - sum(integer_parts)
+                
+                # Give missing points to the elements with the largest remainders
+                indices_by_remainder = sorted(range(len(elements)), key=lambda i: remainders[i], reverse=True)
+                for i in range(missing_points):
+                    integer_parts[indices_by_remainder[i]] += 1
+                    
+                for i, el in enumerate(elements):
+                    el["weight"] = float(integer_parts[i])
+            else:
+                # Fallback if AI gave 0 for everything
+                base_val = 100 // len(elements) if elements else 0
+                missing_points = 100 - (base_val * len(elements))
+                for i, el in enumerate(elements):
+                    el["weight"] = float(base_val + (1 if i < missing_points else 0))
             
             # Clear existing elements to avoid primary/unique key conflicts
             await db.execute(delete(ClaimElement).where(ClaimElement.claim_id == claim_id))

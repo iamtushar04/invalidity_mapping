@@ -56,7 +56,10 @@ cpc_codes = [
 # =========================================================
 
 client = QdrantClient(
-    url=os.getenv("QDRANT_URL")
+    host=os.getenv("QDRANT_HOST", "localhost"),
+    port=int(os.getenv("QDRANT_PORT", "6333")),
+    api_key=os.getenv("QDRANT_API_KEY", None),
+    https=False
 )
 
 COLLECTION_NAME = "testing_patent1"

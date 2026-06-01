@@ -11,7 +11,7 @@ import {
 
 import useClaimSplit from "@/hooks/useClaimSplit";
 import WeightInput from "@/components/WeightInput";
-import { computePriorityFromWeight } from "@/utils/priority";
+import { computePriorityFromWeight, validateWeightSum } from "@/utils/priority";
 import { getCellColor } from "@/utils";
 import { FilteredMatrix } from "@/constant";
 
@@ -125,6 +125,7 @@ export default function ProjectAnalysisPage() {
   // Phase 1: Ingestion
   const handleIngest = async () => {
     if (!patentNum.trim()) return;
+    const cleanedPatentNum = patentNum.replace(/\s+/g, "");
     setLoading(true);
     setError(null);
     try {
@@ -134,7 +135,7 @@ export default function ProjectAnalysisPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ patent_number: patentNum, project_id: projectId })
+        body: JSON.stringify({ patent_number: cleanedPatentNum, project_id: projectId })
       });
       if (!res.ok) {
         const errData = await res.json();
@@ -153,7 +154,7 @@ export default function ProjectAnalysisPage() {
   // Phase 2: Claim Selection
   const toggleClaimSelection = (claimId: string) => {
     setSelectedClaims(prev =>
-      prev.includes(claimId) ? prev.filter(id => id !== claimId) : [...prev, claimId]
+      prev.includes(claimId) ? [] : [claimId]
     );
   };
 
@@ -223,10 +224,72 @@ export default function ProjectAnalysisPage() {
     }
   };
 
+  const [lockedWeights, setLockedWeights] = useState<Set<number>>(new Set());
+
   const handleWeightChange = (index: number, newWeight: number) => {
+    setLockedWeights(prev => new Set(prev).add(index));
     setElements(prev => {
       const list = [...prev];
       list[index].weight = parseFloat(newWeight.toString()) || 0;
+      return list;
+    });
+  };
+
+  const handleAutoBalance = () => {
+    setElements(prev => {
+      const list = [...prev];
+      const lockedSum = Array.from(lockedWeights).reduce((sum, idx) => sum + (list[idx]?.weight || 0), 0);
+      const remainingPoints = Math.max(0, 100 - lockedSum);
+      
+      const unlockedIndices = list.map((_, i) => i).filter(i => !lockedWeights.has(i));
+      
+      // Fallback 1: No unlocked elements
+      if (unlockedIndices.length === 0) {
+        setLockedWeights(new Set());
+        const totalOriginal = list.reduce((sum, el) => sum + (el.weight || 0), 0);
+        if (totalOriginal === 0) {
+           const base = Math.floor(100 / list.length);
+           const remainder = 100 - (base * list.length);
+           list.forEach((el, i) => { el.weight = base + (i < remainder ? 1 : 0); });
+           return list;
+        }
+        const exacts = list.map(el => ((el.weight || 0) / totalOriginal) * 100);
+        const ints = exacts.map(e => Math.floor(e));
+        const rems = exacts.map((e, i) => ({ i, r: e - ints[i] }));
+        rems.sort((a, b) => b.r - a.r);
+        const missing = 100 - ints.reduce((a,b) => a+b, 0);
+        for (let i=0; i<missing; i++) ints[rems[i].i]++;
+        list.forEach((el, i) => { el.weight = ints[i]; });
+        return list;
+      }
+
+      const unlockedSum = unlockedIndices.reduce((sum, idx) => sum + (list[idx].weight || 0), 0);
+      
+      // Fallback 2: Unlocked elements sum to 0
+      if (unlockedSum === 0) {
+        const baseVal = Math.floor(remainingPoints / unlockedIndices.length);
+        const missingPoints = remainingPoints - (baseVal * unlockedIndices.length);
+        unlockedIndices.forEach((idx, i) => {
+          list[idx].weight = baseVal + (i < missingPoints ? 1 : 0);
+        });
+        return list;
+      }
+
+      // Proportional Scaling for Unlocked Elements
+      const exacts = unlockedIndices.map(idx => ((list[idx].weight || 0) / unlockedSum) * remainingPoints);
+      const ints = exacts.map(e => Math.floor(e));
+      const rems = exacts.map((e, i) => ({ idx: unlockedIndices[i], arrayIndex: i, r: e - ints[i] }));
+      rems.sort((a, b) => b.r - a.r);
+      
+      const missing = remainingPoints - ints.reduce((a,b) => a+b, 0);
+      for (let i = 0; i < missing; i++) {
+        ints[rems[i].arrayIndex]++;
+      }
+      
+      unlockedIndices.forEach((idx, i) => {
+        list[idx].weight = ints[i];
+      });
+
       return list;
     });
   };
@@ -263,11 +326,11 @@ export default function ProjectAnalysisPage() {
   };
 
   const handleSaveWeights = async () => {
-    // No strict sum enforcement – weights are independent scores.
-    // Users may assign any values up to 100 per element.
-    // The backend will clamp each weight individually.
-    // Proceed to save the layout.
-
+    // Validate that the weights sum exactly to 100
+    if (!validateWeightSum(elements)) {
+      setError("Total weight must equal exactly 100%. Please adjust the weights before saving.");
+      return;
+    }
 
     setLoading(true);
     try {
@@ -734,9 +797,11 @@ export default function ProjectAnalysisPage() {
                     <span className="font-bold font-mono">Claim {claim.claim_number}</span>
                     <span className="text-xs uppercase px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-semibold">{claim.claim_type}</span>
                     {/* Priority badge */}
-                    <span className="ml-2 text-xs uppercase px-2 py-0.5 rounded bg-indigo-600/20 text-indigo-300 font-semibold">
-                      {computePriorityFromWeight(claimWeightMap[claim.id])}
-                    </span>
+                    {claimWeightMap[claim.id] !== undefined && (
+                      <span className="ml-2 text-xs uppercase px-2 py-0.5 rounded bg-indigo-600/20 text-indigo-300 font-semibold">
+                        {computePriorityFromWeight(claimWeightMap[claim.id])}
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm mt-2 leading-relaxed">{claim.claim_text}</p>
                 </div>
@@ -771,7 +836,7 @@ export default function ProjectAnalysisPage() {
                 <thead>
                   <tr className="border-b border-slate-800 bg-slate-900/60 font-mono text-xs uppercase text-slate-400">
                     <th className="p-4 w-20">ID</th>
-                    <th className="p-4 w-44">Label</th>
+
                     <th className="p-4">Limitation (Exact Text)</th>
                     <th className="p-4 w-32 text-right">Weight (%)</th>
                   </tr>
@@ -784,11 +849,7 @@ export default function ProjectAnalysisPage() {
                           <input type="text" value={el.element_id} onChange={e => handleElementChange(idx, 'element_id', e.target.value)} className="w-16 bg-slate-800 p-1 rounded border border-slate-700" placeholder="ID" />
                         ) : el.element_id}
                       </td>
-                      <td className="p-4 font-semibold text-slate-300">
-                        {el.is_custom ? (
-                          <input type="text" value={el.label} onChange={e => handleElementChange(idx, 'label', e.target.value)} className="w-full bg-slate-800 p-1 rounded border border-slate-700" placeholder="Label" />
-                        ) : el.label}
-                      </td>
+
                       <td className="p-4 text-slate-400 leading-relaxed text-xs">
                         {el.is_custom ? (
                           <textarea value={el.text} onChange={e => handleElementChange(idx, 'text', e.target.value)} className="w-full bg-slate-800 p-2 rounded border border-slate-700 focus:border-indigo-500 focus:outline-none" placeholder="Enter custom limitation text..." rows={3} />
@@ -833,6 +894,29 @@ export default function ProjectAnalysisPage() {
                 >
                   <Plus className="w-4 h-4 text-indigo-400" /> Add Custom Limitation
                 </button>
+                
+                {(() => {
+                  const total = elements.reduce((sum, el) => sum + (el.weight ?? 0), 0);
+                  const is100 = Math.abs(total - 100) <= 0.5;
+                  return (
+                    <div className="flex items-center gap-4">
+                      {!is100 && (
+                        <button
+                          onClick={handleAutoBalance}
+                          className="bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 px-3 py-1.5 rounded-lg border border-indigo-500/30 transition flex items-center gap-2"
+                        >
+                          <Sparkles className="w-3 h-3" /> Auto-Balance
+                        </button>
+                      )}
+                      <div className="flex items-center gap-3 text-sm font-bold bg-slate-900 px-4 py-2 rounded-lg border border-slate-800">
+                        <span className="text-slate-400">Total Weight:</span>
+                        <span className={is100 ? "text-emerald-400" : "text-rose-400"}>
+                          {Math.round(total)}%
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 

@@ -48,9 +48,17 @@ class Settings(BaseSettings):
     )
 
     # Qdrant configuration
-    QDRANT_URL: str = Field(
+    QDRANT_HOST: str = Field(
+        default="localhost",
+        validation_alias="QDRANT_HOST"
+    )
+    QDRANT_PORT: int = Field(
+        default=6333,
+        validation_alias="QDRANT_PORT"
+    )
+    QDRANT_API_KEY: str = Field(
         default="",
-        validation_alias="QDRANT_URL"
+        validation_alias="QDRANT_API_KEY"
     )
 
     # Redis configuration
