@@ -17,9 +17,10 @@ export default function WeightInput({ value, onChange }: Props) {
   return (
     <input
       type="number"
+      step="1"
       min={0}
       max={100}
-      value={value}
+      value={Math.round(value)}
       onChange={handleChange}
       className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 w-20 text-right focus:outline-none focus:border-indigo-500 font-mono font-bold text-slate-200"
     />
