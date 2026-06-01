@@ -1,0 +1,1196 @@
+"use client";
+
+import React, { useState, useEffect, useRef } from "react";
+import { useParams, useRouter } from "next/navigation";
+import {
+  FileText, CheckSquare, Layers, Database, Play,
+  Table as TableIcon, FileDown, ArrowLeft, Plus,
+  Trash2, Loader2, Sparkles, AlertCircle, Check,
+  Edit3, ShieldAlert
+} from "lucide-react";
+
+import useClaimSplit from "@/hooks/useClaimSplit";
+import WeightInput from "@/components/WeightInput";
+import { computePriorityFromWeight } from "@/utils/priority";
+import { getCellColor } from "@/utils";
+import { FilteredMatrix } from "@/constant";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL as string;
+
+export default function ProjectAnalysisPage() {
+  const params = useParams();
+  const router = useRouter();
+  console.log("params", params)
+  const projectId = params.id as string;
+
+  // Authentication & Project
+  const [token, setToken] = useState<string | null>(null);
+  const [project, setProject] = useState<any>(null);
+
+  // Loading & UI Step
+  const [step, setStep] = useState<number>(0);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Subject Patent Ingestion (Phase 1)
+  const [patentNum, setPatentNum] = useState<string>("");
+  const [patentData, setPatentData] = useState<any>(null);
+
+  // Claim Selection (Phase 2)
+  const [selectedClaims, setSelectedClaims] = useState<string[]>([]); // UUID list
+
+  // Claim Elements Breakdown (Phase 3)
+  const [activeClaimId, setActiveClaimId] = useState<string | null>(null);
+  const [elements, setElements] = useState<any[]>([]);
+  // Mapping claimId → weight (average weight of its elements) for badge display
+  const [claimWeightMap, setClaimWeightMap] = useState<Record<string, number>>({});
+  const { runSplit, loading: splitLoading, error: splitError } = useClaimSplit();
+
+  // Prior Art Input (Phase 4)
+  const [priorArtInput, setPriorArtInput] = useState<string>("");
+  const [priorArtList, setPriorArtList] = useState<any[]>([]);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [embedStatuses, setEmbedStatuses] = useState<Record<string, string>>({});
+
+  // Background Job Mapping Status (Phase 5)
+  const [analysisStatus, setAnalysisStatus] = useState<any>(null);
+  const [matrixData, setMatrixData] = useState<any>(null);
+  const [matrixFilter, setMatrixFilter] = useState<string>("all");
+
+  // Claim Chart & Export (Phase 6)
+  const [selectedRefPatent, setSelectedRefPatent] = useState<any>(null);
+  const [chartData, setChartData] = useState<any>(null);
+  const [chartRows, setChartRows] = useState<any[]>([]);
+  const [isEditingChart, setIsEditingChart] = useState<boolean>(false);
+
+  // Initialize and check credentials
+  useEffect(() => {
+    const storedToken = localStorage.getItem("token");
+    if (!storedToken) {
+      router.push("/");
+      return;
+    }
+    setToken(storedToken);
+    fetchProject(storedToken);
+  }, []);
+
+  const fetchProject = async (authToken: string) => {
+    try {
+      setLoading(true);
+      const res = await fetch(`${BACKEND_URL}/projects/${projectId}`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (!res.ok) throw new Error("Failed to load project details.");
+      const data = await res.json();
+      setProject(data);
+
+      // Auto-fetch ingested subject patent if present
+      if (data.subject_patent_id) {
+        await fetchSubjectPatent(data.subject_patent_id, authToken, data);
+        setStep(1); // Jump to details
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchSubjectPatent = async (patentId: string, authToken: string, projectData?: any) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/patents/project/${projectId}`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPatentData(data);
+        setPatentNum(data.patent_number);
+        if (data.claims && data.claims.length > 0) {
+          // Preset select claim selection if present in project
+          const proj = projectData || project;
+          setSelectedClaims(proj?.selected_claim_ids || []);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Phase 1: Ingestion
+  const handleIngest = async () => {
+    if (!patentNum.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/patents/ingest`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ patent_number: patentNum, project_id: projectId })
+      });
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || "Ingestion failed.");
+      }
+      const data = await res.json();
+      setPatentData(data);
+      setStep(1); // Go to detail review
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Phase 2: Claim Selection
+  const toggleClaimSelection = (claimId: string) => {
+    setSelectedClaims(prev =>
+      prev.includes(claimId) ? prev.filter(id => id !== claimId) : [...prev, claimId]
+    );
+  };
+
+  const handleSaveSelectedClaims = async () => {
+    if (selectedClaims.length === 0) {
+      setError("Please select at least one claim.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/claims/project/${projectId}/selected-claims`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ claim_ids: selectedClaims })
+      });
+      if (!res.ok) throw new Error("Failed to save selected claims.");
+
+      // --- NEW: Call LLM split service using the hook defined at component top
+      // Ensure we have a valid token before calling the split service
+      if (!token) {
+        setError("Authentication token missing. Please log in again.");
+        setLoading(false);
+        return;
+      }
+      const splitResult = await runSplit(projectId, selectedClaims, token);
+      // splitResult format: { claimId: [{ element_id, text, weight, label, ... }] }
+      // Update elements for the first claim and store weight map for UI badges
+      // splitResult format: { claimId: [{ element_id, text, weight, label, ... }] }
+      // Update elements for the first claim and store weight map for UI badges
+      const firstClaimId = selectedClaims[0];
+      setActiveClaimId(firstClaimId);
+      setElements(splitResult[firstClaimId] || []);
+      // Build a simple weight map: average weight per claim (or sum of its elements)
+      const weightMap: Record<string, number> = {};
+      for (const cid of selectedClaims) {
+        const elems = splitResult[cid] || [];
+        const sum = elems.reduce((a: number, e: any) => a + (e.weight ?? 0), 0);
+        weightMap[cid] = sum / (elems.length || 1);
+      }
+      setClaimWeightMap(weightMap);
+      setStep(3); // Go to weightingng
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Phase 3: Claim Weighting
+  const fetchOrParseElements = async (claimId: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/claims/${claimId}/parse-elements`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("Failed to parse claim elements.");
+      const data = await res.json();
+      setElements(data);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleWeightChange = (index: number, newWeight: number) => {
+    setElements(prev => {
+      const list = [...prev];
+      list[index].weight = parseFloat(newWeight.toString()) || 0;
+      return list;
+    });
+  };
+
+  const handleElementChange = (index: number, field: string, value: any) => {
+    setElements(prev => {
+      const list = [...prev];
+      list[index] = { ...list[index], [field]: value };
+      return list;
+    });
+  };
+
+  const handleAddCustomLimitation = () => {
+    const newId = `C${elements.filter((e: any) => e.is_custom).length + 1}`;
+    setElements((prev: any[]) => [
+      ...prev,
+      {
+        element_id: newId,
+        label: "Custom Limitation",
+        text: "",
+        weight: 0,
+        comment: "",
+        is_custom: true
+      }
+    ]);
+  };
+
+  const handleRemoveCustomLimitation = (index: number) => {
+    setElements(prev => {
+      const list = [...prev];
+      list.splice(index, 1);
+      return list;
+    });
+  };
+
+  const handleSaveWeights = async () => {
+    // No strict sum enforcement – weights are independent scores.
+    // Users may assign any values up to 100 per element.
+    // The backend will clamp each weight individually.
+    // Proceed to save the layout.
+
+
+    setLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/claims/${activeClaimId}/elements`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ elements })
+      });
+      if (!res.ok) throw new Error("Failed to save customized weights.");
+
+      // Fetch existing prior art
+      await fetchPriorArt();
+      setStep(4); // Prior art
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Phase 4: Prior Art Input
+  const fetchPriorArt = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPriorArtList(data);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Poll embed status
+  useEffect(() => {
+    let interval: any;
+    if (step === 4 && projectId && token) {
+      const fetchEmbedStatus = async () => {
+        try {
+          const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}/embed-status`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setEmbedStatuses(data.statuses || {});
+          }
+        } catch (err) {
+          console.error("Failed to fetch embed status:", err);
+        }
+      };
+
+      fetchEmbedStatus();
+      interval = setInterval(fetchEmbedStatus, 3000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [step, projectId, token]);
+
+  const handleAddManualPriorArt = async () => {
+    if (!priorArtInput.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}/numbers`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ patent_numbers: priorArtInput })
+      });
+      if (!res.ok) throw new Error("Failed to queue prior art numbers.");
+      setPriorArtInput("");
+      setUploadMsg("Prior art numbers queued! Refresh list in 3 seconds.");
+      setTimeout(fetchPriorArt, 3000);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setLoading(true);
+    const formData = new FormData();
+    formData.append("file", files[0]);
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+      });
+      if (!res.ok) throw new Error("Failed to upload excel spreadsheet.");
+      setUploadMsg("Spreadsheet parsed and queued! Refresh list in 3 seconds.");
+      setTimeout(fetchPriorArt, 3000);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEmbedPatent = async (patentNumber: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}/patent/${patentNumber}/embed`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Embedding generation failed.");
+      }
+      setUploadMsg(`Successfully stored ${patentNumber} in the embedding database.`);
+      fetchPriorArt();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Active status polling loop
+  // Phase 5: Obviousness Analysis & Matrix - Run analysis for all selected claims
+  const handleRunAnalysisAll = async () => {
+    if (!selectedClaims || selectedClaims.length === 0) {
+      setError("No claims selected for analysis.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      // Trigger analysis for each selected claim sequentially
+      for (const claimId of selectedClaims) {
+        const res = await fetch(`${BACKEND_URL}/analysis/${projectId}/run?claim_id=${claimId}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.detail || `Analysis trigger failed for claim ${claimId}`);
+        }
+      }
+      // After triggering all, start polling status
+      setStep(5);
+      pollAnalysisStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  // Active status polling loop
+  const pollInterval = useRef<any>(null);
+
+  const pollAnalysisStatus = () => {
+    if (pollInterval.current) clearInterval(pollInterval.current);
+
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/analysis/${projectId}/status`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setAnalysisStatus(data);
+
+          if (data.percent_complete === 100) {
+            clearInterval(pollInterval.current);
+            fetchMatrixData();
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    fetchStatus();
+    pollInterval.current = setInterval(fetchStatus, 3000);
+  };
+
+  const fetchMatrixData = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/analysis/${projectId}/matrix`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMatrixData(data);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Phase 6: Chart Generation & Persistence
+  const handleLoadClaimChart = async (refPatent: any) => {
+    setSelectedRefPatent(refPatent);
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/${refPatent.reference_patent_id}/generate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("Failed to generate or fetch claim chart.");
+      const data = await res.json();
+      setChartData(data);
+      setChartRows(data.chart_rows || []);
+      setStep(6); // Show Claim Chart
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdateChartRow = (index: number, field: string, value: string) => {
+    setChartRows(prev => {
+      const list = [...prev];
+      list[index][field] = value;
+      return list;
+    });
+  };
+
+  const handleSaveChartEdits = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/${selectedRefPatent.reference_patent_id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ chart_rows: chartRows })
+      });
+      if (!res.ok) throw new Error("Failed to save changes.");
+      const data = await res.json();
+      setChartData(data);
+      setChartRows(data.chart_rows || []);
+      setIsEditingChart(false);
+      await fetchMatrixData();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDownloadReport = (format: string) => {
+    if (!selectedRefPatent) return;
+    const url = `${BACKEND_URL}/charts/${projectId}/charts/${selectedRefPatent.reference_patent_id}/export?format=${format}&token=${token}`;
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Claim_Chart_${patentNum}_vs_${selectedRefPatent.patent_number}.${format}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Helpers for Matrix Rendering Filters
+  const filteredRows = () => {
+    if (!matrixData || !matrixData.rows) return [];
+
+    return matrixData.rows.filter((row: any) => {
+      if (matrixFilter === "all") return true;
+      if (matrixFilter === "strong") return row.score >= 80;
+      if (matrixFilter === "good") return row.score >= 50 && row.score < 80;
+      if (matrixFilter === "partial") return row.score < 50;
+      if (matrixFilter === "all_y") {
+        return row.mappings.every((m: any) => m.classification === "Y");
+      }
+      if (matrixFilter === "missing_one") {
+        const notY = row.mappings.filter((m: any) => m.classification !== "Y").length;
+        return notY === 1;
+      }
+      return true;
+    });
+  };
+
+
+
+  return (
+    <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans">
+      <header className="border-b border-slate-800/80 bg-slate-950/50 backdrop-blur px-8 py-4 flex items-center justify-between sticky top-0 z-50">
+        <div className="flex items-center gap-4">
+          <div className="bg-indigo-600/20 p-2 rounded-xl border border-indigo-500/30 text-indigo-400">
+            <Sparkles className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-200 via-indigo-100 to-indigo-300 bg-clip-text text-transparent">
+              Invalidity Analysis Suite
+            </h1>
+            <p className="text-xs text-slate-400 font-mono">Project ID: {projectId.slice(0, 8)}... / {project?.name}</p>
+          </div>
+        </div>
+
+        <div className="hidden lg:flex items-center gap-2 text-xs font-semibold text-slate-400">
+          {[
+            { stepNum: 0, label: "Ingest" },
+            { stepNum: 1, label: "Review" },
+            { stepNum: 2, label: "Claims" },
+            { stepNum: 3, label: "Weights" },
+            { stepNum: 4, label: "Prior Art" },
+            { stepNum: 5, label: "Matrix" },
+            { stepNum: 6, label: "Chart" }
+          ].map((item) => (
+            <React.Fragment key={item.stepNum}>
+              <div
+                onClick={() => {
+                  if (patentData) setStep(item.stepNum);
+                }}
+                className={`px-3 py-1.5 rounded-lg cursor-pointer transition-all duration-300 border ${step === item.stepNum
+                  ? "bg-indigo-600/20 text-indigo-300 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.15)]"
+                  : "bg-slate-900/60 border-transparent hover:border-slate-700 text-slate-500"
+                  }`}
+              >
+                {item.label}
+              </div>
+              {item.stepNum < 6 && <div className="w-1 h-0.5 bg-slate-800" />}
+            </React.Fragment>
+          ))}
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-7xl w-full mx-auto p-8">
+        {error && (
+          <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            <p className="text-sm font-medium">{error}</p>
+            <button onClick={() => setError(null)} className="ml-auto hover:text-white text-xs">Dismiss</button>
+          </div>
+        )}
+
+        {loading && (
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-50 flex flex-col items-center justify-center gap-3">
+            <Loader2 className="w-12 h-12 text-indigo-500 animate-spin" />
+            <p className="text-sm text-slate-300 font-medium">Processing request with LLM routing models...</p>
+          </div>
+        )}
+
+        {step === 0 && (
+          <div className="max-w-xl mx-auto mt-12 bg-slate-950/40 border border-slate-800/80 rounded-2xl p-8 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
+            <div className="text-center mb-6">
+              <FileText className="w-12 h-12 text-indigo-400 mx-auto mb-3" />
+              <h2 className="text-2xl font-bold mb-2">Ingest Subject Patent</h2>
+              <p className="text-sm text-slate-400">
+                Enter your target patent number. We fetch real USPTO database XML files and run `gpt-5-mini` parsing.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Patent Number</label>
+                <input
+                  type="text"
+                  value={patentNum}
+                  onChange={(e) => setPatentNum(e.target.value)}
+                  placeholder="e.g. US6285999B1 (Google PageRank)"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 focus:outline-none focus:border-indigo-500 transition font-mono"
+                />
+              </div>
+
+              <button
+                onClick={handleIngest}
+                className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-semibold transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
+              >
+                <Sparkles className="w-4 h-4" /> Start Ingestion
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 1 && patentData && (
+          <div className="space-y-8">
+            <div className="flex justify-between items-center">
+              <div>
+                <h2 className="text-2xl font-bold">{patentData.title}</h2>
+                <p className="text-sm text-slate-400 font-mono">Assignee: {patentData.assignee} / Ingested Successfully</p>
+              </div>
+              <button
+                onClick={() => setStep(2)}
+                className="bg-indigo-600 hover:bg-indigo-500 px-6 py-2.5 rounded-xl font-semibold transition"
+              >
+                Select Claims →
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-slate-950/40 border border-slate-800 p-6 rounded-2xl backdrop-blur">
+                <h3 className="text-sm font-bold text-indigo-400 uppercase tracking-widest font-mono mb-3">Core Concept</h3>
+                <p className="text-sm text-slate-300 leading-relaxed">{patentData.structured_summary?.core_inventive_concept}</p>
+              </div>
+
+              <div className="bg-slate-950/40 border border-slate-800 p-6 rounded-2xl backdrop-blur">
+                <h3 className="text-sm font-bold text-indigo-400 uppercase tracking-widest font-mono mb-3">Problem-Solution Mapping</h3>
+                <div className="space-y-2 text-sm text-slate-300">
+                  <p><strong className="text-rose-400">Problem:</strong> {patentData.structured_summary?.problem_solution_mapping?.problem}</p>
+                  <p><strong className="text-emerald-400">Solution:</strong> {patentData.structured_summary?.problem_solution_mapping?.solution}</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-950/40 border border-slate-800 p-6 rounded-2xl backdrop-blur">
+                <h3 className="text-sm font-bold text-indigo-400 uppercase tracking-widest font-mono mb-3">Novelty Claims</h3>
+                <ul className="list-disc list-inside text-sm text-slate-300 space-y-1">
+                  {patentData.structured_summary?.novelty_points?.map((item: string, idx: number) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            <div className="bg-slate-950/20 border border-slate-800/80 p-8 rounded-2xl">
+              <h3 className="text-lg font-bold mb-4">Patent Abstract</h3>
+              <p className="text-sm text-slate-300 leading-relaxed">{patentData.abstract}</p>
+            </div>
+          </div>
+        )}
+
+        {step === 2 && patentData && (
+          <div className="max-w-2xl mx-auto space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold mb-1">Select Claims for Invalidity Analysis</h2>
+              <p className="text-sm text-slate-400">Choose which claims you want to segment, weight, and check against prior art.</p>
+            </div>
+
+            <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-6 space-y-4">
+              {patentData.claims?.map((claim: any) => (
+                <div
+                  key={claim.id}
+                  onClick={() => toggleClaimSelection(claim.id)}
+                  className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedClaims.includes(claim.id)
+                    ? "bg-indigo-600/10 border-indigo-500 text-slate-100"
+                    : "bg-slate-900/40 border-slate-800 hover:border-slate-700 text-slate-400"
+                    }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-5 h-5 rounded-md border flex items-center justify-center ${selectedClaims.includes(claim.id)
+                      ? "bg-indigo-600 border-indigo-500 text-white"
+                      : "border-slate-700"
+                      }`}>
+                      {selectedClaims.includes(claim.id) && <Check className="w-3 h-3" />}
+                    </div>
+                    <span className="font-bold font-mono">Claim {claim.claim_number}</span>
+                    <span className="text-xs uppercase px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-semibold">{claim.claim_type}</span>
+                    {/* Priority badge */}
+                    <span className="ml-2 text-xs uppercase px-2 py-0.5 rounded bg-indigo-600/20 text-indigo-300 font-semibold">
+                      {computePriorityFromWeight(claimWeightMap[claim.id])}
+                    </span>
+                  </div>
+                  <p className="text-sm mt-2 leading-relaxed">{claim.claim_text}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-between items-center">
+              <button onClick={() => setStep(1)} className="text-slate-400 hover:text-white flex items-center gap-2">
+                <ArrowLeft className="w-4 h-4" /> Back to summary
+              </button>
+              <button
+                onClick={handleSaveSelectedClaims}
+                className="bg-indigo-600 hover:bg-indigo-500 px-6 py-2.5 rounded-xl font-semibold transition"
+              >
+                Confirm Claim & Split Elements →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && elements && (
+          <div className="max-w-4xl mx-auto space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold mb-1">Claim Segmentation & Weight Assignments</h2>
+              <p className="text-sm text-slate-400">
+                Segmented using `gpt-5-mini`. Customize novelty weights per limitation. Total must equal exactly 100.0%.
+              </p>
+            </div>
+
+            <div className="bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-900/60 font-mono text-xs uppercase text-slate-400">
+                    <th className="p-4 w-20">ID</th>
+                    <th className="p-4 w-44">Label</th>
+                    <th className="p-4">Limitation (Exact Text)</th>
+                    <th className="p-4 w-32 text-right">Weight (%)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-sm">
+                  {elements.map((el, idx) => (
+                    <tr key={el.id || idx} className="hover:bg-slate-900/20">
+                      <td className="p-4 font-mono font-bold text-indigo-400">
+                        {el.is_custom ? (
+                          <input type="text" value={el.element_id} onChange={e => handleElementChange(idx, 'element_id', e.target.value)} className="w-16 bg-slate-800 p-1 rounded border border-slate-700" placeholder="ID" />
+                        ) : el.element_id}
+                      </td>
+                      <td className="p-4 font-semibold text-slate-300">
+                        {el.is_custom ? (
+                          <input type="text" value={el.label} onChange={e => handleElementChange(idx, 'label', e.target.value)} className="w-full bg-slate-800 p-1 rounded border border-slate-700" placeholder="Label" />
+                        ) : el.label}
+                      </td>
+                      <td className="p-4 text-slate-400 leading-relaxed text-xs">
+                        {el.is_custom ? (
+                          <textarea value={el.text} onChange={e => handleElementChange(idx, 'text', e.target.value)} className="w-full bg-slate-800 p-2 rounded border border-slate-700 focus:border-indigo-500 focus:outline-none" placeholder="Enter custom limitation text..." rows={3} />
+                        ) : (
+                          el.text
+                        )}
+                        <div className="mt-3">
+                          <textarea
+                            value={el.comment || ''}
+                            onChange={e => handleElementChange(idx, 'comment', e.target.value)}
+                            placeholder="Add your context or perception here to guide the AI search..."
+                            className="w-full bg-indigo-900/10 border border-indigo-500/20 text-indigo-300 p-2.5 rounded-lg text-xs placeholder:text-indigo-400/50 focus:outline-none focus:border-indigo-500 transition-colors"
+                            rows={2}
+                          />
+                        </div>
+                      </td>
+                      <td className="p-4 text-right align-top pt-6">
+                        <div className="flex flex-col items-end gap-2">
+                          <WeightInput
+                            value={el.weight ?? 0}
+                            onChange={(newWeight) => handleWeightChange(idx, newWeight)}
+                          />
+                          {el.is_custom && (
+                            <button
+                              onClick={() => handleRemoveCustomLimitation(idx)}
+                              className="text-rose-400/70 hover:text-rose-400 transition text-xs mt-2 flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3 h-3" /> Remove
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-between items-center text-xs">
+                <button
+                  onClick={handleAddCustomLimitation}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg font-semibold transition flex items-center gap-2 border border-slate-700"
+                >
+                  <Plus className="w-4 h-4 text-indigo-400" /> Add Custom Limitation
+                </button>
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center">
+              <button onClick={() => setStep(2)} className="text-slate-400 hover:text-white flex items-center gap-2">
+                <ArrowLeft className="w-4 h-4" /> Back to selection
+              </button>
+              <button
+                onClick={handleSaveWeights}
+                className="bg-indigo-600 hover:bg-indigo-500 px-6 py-2.5 rounded-xl font-semibold transition"
+              >
+                Save Weighting Layout →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 4 && (
+          <div className="max-w-3xl mx-auto space-y-8">
+            <div>
+              <h2 className="text-2xl font-bold mb-1">Assemble Prior Art Reference Pool</h2>
+              <p className="text-sm text-slate-400">Add reference numbers manually or upload an Excel file column A mapping list.</p>
+            </div>
+
+            {uploadMsg && (
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm">
+                {uploadMsg}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-6 space-y-4">
+                <h3 className="font-bold flex items-center gap-2"><Database className="w-5 h-5 text-indigo-400" /> Manual Patent Entry</h3>
+                <p className="text-xs text-slate-400">Enter comma-separated patent numbers.</p>
+                <textarea
+                  value={priorArtInput}
+                  onChange={(e) => setPriorArtInput(e.target.value)}
+                  placeholder="e.g. US5920859A, US6000000A"
+                  rows={4}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-xl p-3 focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                />
+                <button
+                  onClick={handleAddManualPriorArt}
+                  className="bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 rounded-xl font-semibold text-sm transition"
+                >
+                  Add Prior Art Numbers
+                </button>
+              </div>
+
+              <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between">
+                <div className="space-y-3">
+                  <h3 className="font-bold flex items-center gap-2"><Database className="w-5 h-5 text-indigo-400" /> Excel Spreadsheet Upload</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Upload your spreadsheet list. We securely parse column A matching lists dynamically on the backend.
+                  </p>
+                </div>
+
+                <div className="border-2 border-dashed border-slate-800 rounded-xl p-6 text-center hover:border-indigo-500 transition cursor-pointer relative mt-4">
+                  <input
+                    type="file"
+                    onChange={handleExcelUpload}
+                    accept=".xlsx,.xls"
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                  <FileDown className="w-8 h-8 text-indigo-400 mx-auto mb-2" />
+                  <span className="text-xs font-semibold text-slate-400">Choose .xlsx file to upload</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-950/20 border border-slate-800/80 rounded-2xl p-6">
+              <h3 className="font-bold mb-4">Ingested Reference Pool ({priorArtList?.length})</h3>
+
+              {priorArtList?.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-6">No references added yet.</p>
+              ) : (
+                <div className="divide-y divide-slate-800/60">
+                  {priorArtList?.map((art) => {
+                    const rawStatus = embedStatuses[art?.patent_number] || art?.fetch_status || "unknown";
+                    const embedStatus = rawStatus.toLowerCase();
+                    const isProcessing = ["pending", "fetching", "embedding"].includes(embedStatus);
+
+                    let displayText = embedStatus.toUpperCase();
+                    if (embedStatus === "done" || embedStatus === "success") displayText = "✅ Ready";
+                    else if (embedStatus === "embedding") displayText = "⚙️ AI Processing...";
+                    else if (embedStatus === "fetching") displayText = "🌐 Fetching...";
+                    else if (embedStatus === "pending") displayText = "🕒 Pending...";
+                    else if (embedStatus === "failed") displayText = "❌ Failed";
+
+                    return (
+                      <div key={art?.id} className="py-3 flex justify-between items-center">
+                        <div>
+                          <span
+                            onClick={() => !isProcessing && handleEmbedPatent(art?.patent_number)}
+                            className={`font-mono font-bold ${isProcessing ? 'text-slate-500 cursor-not-allowed' : 'text-indigo-400 hover:text-indigo-300 hover:underline cursor-pointer'} transition`}
+                            title={isProcessing ? "Currently processing..." : "Click to manually re-embed"}
+                          >
+                            {art?.patent_number}
+                          </span>
+                          <span className="text-xs text-slate-500 ml-4">{art?.title || "Loading abstract..."}</span>
+                        </div>
+                        <div className="flex gap-2 items-center">
+                          {isProcessing && <Loader2 className="w-3 h-3 text-indigo-400 animate-spin" />}
+                          <span className={`text-xs px-2 py-0.5 rounded font-mono font-bold uppercase ${(embedStatus === 'done' || embedStatus === 'success')
+                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                            : embedStatus === 'failed'
+                              ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                              : "bg-slate-800 text-slate-400 animate-pulse"
+                            }`}>
+                            {displayText}
+                          </span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-between items-center">
+              <button onClick={() => setStep(3)} className="text-slate-400 hover:text-white flex items-center gap-2">
+                <ArrowLeft className="w-4 h-4" /> Back to weights
+              </button>
+              <button
+                onClick={handleRunAnalysisAll}
+                disabled={priorArtList?.some(art => ["pending", "fetching", "embedding"].includes(embedStatuses[art.patent_number]))}
+                className={`px-6 py-2.5 rounded-xl font-semibold transition flex items-center gap-2 ${priorArtList?.some(art => ["pending", "fetching", "embedding"].includes(embedStatuses[art?.patent_number]))
+                  ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                  : "bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-600/20"
+                  }`}
+              >
+                <Play className="w-4 h-4" /> {priorArtList.some(art => ["pending", "fetching", "embedding"].includes(embedStatuses[art.patent_number])) ? "Processing..." : "Run Deep Obviousness Analysis →"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 5 && (
+          <div className="space-y-8">
+            {analysisStatus && analysisStatus?.percent_complete < 100 && (
+              <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-6 space-y-3">
+                <div className="flex justify-between text-sm">
+                  <span className="font-semibold text-indigo-400">Processing Background Analysis...</span>
+                  <span className="font-mono">{analysisStatus?.percent_complete}%</span>
+                </div>
+                <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-500 transition-all duration-500"
+                    style={{ width: `${analysisStatus?.percent_complete}%` }}
+                  />
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed font-mono">
+                  Jobs are running asynchronously on the server and will persist even if this window is closed.
+                </p>
+              </div>
+            )}
+
+            {matrixData && (
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+                <div className="space-y-4">
+                  <h3 className="font-bold text-xs uppercase tracking-widest font-mono text-slate-400">Filter Matrix</h3>
+
+                  {FilteredMatrix?.map((f) => (
+                    <div
+                      key={f?.filterId}
+                      onClick={() => setMatrixFilter(f?.filterId)}
+                      className={`p-3 rounded-xl border cursor-pointer transition-all text-xs font-semibold ${matrixFilter === f?.filterId
+                        ? "bg-indigo-600/10 border-indigo-500 text-indigo-300"
+                        : "bg-slate-900/40 border-slate-800 hover:border-slate-700 text-slate-400"
+                        }`}
+                    >
+                      {f?.label}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="lg:col-span-3 bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-slate-900/60 font-mono text-xs uppercase text-slate-400">
+                          <th className="p-4">Prior Art Patent</th>
+                          <th className="p-4 text-center">Score</th>
+                          {matrixData?.rows[0]?.mappings?.map((m: any) => (
+                            <th key={m?.element_id} className="p-4 text-center w-16">{m?.element_id}</th>
+                          ))}
+                          <th className="p-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 text-sm">
+                        {filteredRows()?.map((row: any) => (
+                          <tr key={row.reference_patent_id} className="hover:bg-slate-900/20">
+                            <td className="p-4">
+                              <span className="font-mono font-bold text-slate-300">{row.patent_number}</span>
+                              <div className="text-xxs text-slate-500 font-semibold truncate max-w-xs">{row.title}</div>
+                            </td>
+                            <td className="p-4 text-center">
+                              <span className={`px-2 py-0.5 rounded font-mono font-bold ${row.score >= 80
+                                ? "bg-emerald-500/10 text-emerald-400"
+                                : row.score >= 50
+                                  ? "bg-amber-500/10 text-amber-400"
+                                  : "bg-rose-500/10 text-rose-400"
+                                }`}>
+                                {row.score.toFixed(1)}
+                              </span>
+                            </td>
+
+                            {row?.mappings?.map((cell: any) => (
+                              <td key={cell?.element_id} className="p-4 text-center">
+                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center mx-auto text-xxs font-bold border ${getCellColor(cell.analyst_classification || cell.classification)}`}>
+                                  {cell.analyst_classification || cell.classification}
+                                </span>
+                              </td>
+                            ))}
+
+                            <td className="p-4 text-right">
+                              <button
+                                onClick={() => handleLoadClaimChart(row)}
+                                className="bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 ml-auto"
+                              >
+                                <TableIcon className="w-3 h-3" /> Chart
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 6 && selectedRefPatent && chartData && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center flex-wrap gap-4">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setStep(5)}
+                  className="bg-slate-900 hover:bg-slate-800 border border-slate-800 p-2.5 rounded-xl text-slate-400 hover:text-white"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
+                <div>
+                  <h2 className="text-xl font-bold">Claim Chart Summary</h2>
+                  <p className="text-xs text-slate-400 font-mono">Subject: {patentNum} vs Prior Art: {selectedRefPatent.patent_number}</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {isEditingChart ? (
+                  <React.Fragment>
+                    <button
+                      onClick={handleSaveChartEdits}
+                      className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2.5 rounded-xl font-semibold text-xs transition flex items-center gap-1"
+                    >
+                      <Check className="w-4 h-4" /> Save Persisted Edits
+                    </button>
+                    <button
+                      onClick={() => {
+                        setChartRows(chartData.chart_rows || []);
+                        setIsEditingChart(false);
+                      }}
+                      className="bg-slate-800 hover:bg-slate-700 px-4 py-2.5 rounded-xl text-xs"
+                    >
+                      Cancel
+                    </button>
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <button
+                      onClick={() => setIsEditingChart(true)}
+                      className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2.5 rounded-xl font-semibold text-xs transition flex items-center gap-1"
+                    >
+                      <Edit3 className="w-4 h-4" /> Customize Rationale
+                    </button>
+
+                    <button
+                      onClick={() => handleDownloadReport('docx')}
+                      className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                    >
+                      Word (.docx)
+                    </button>
+                    <button
+                      onClick={() => handleDownloadReport('xlsx')}
+                      className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                    >
+                      Excel (.xlsx)
+                    </button>
+                    <button
+                      onClick={() => handleDownloadReport('pdf')}
+                      className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                    >
+                      PDF (.pdf)
+                    </button>
+                  </React.Fragment>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-900/60 font-mono text-xs uppercase text-slate-400">
+                    <th className="p-4 w-20">ID</th>
+                    <th className="p-4 w-1/4">Claim limitation (Subject)</th>
+                    <th className="p-4 w-1/4">Prior Art Citation ({selectedRefPatent.patent_number})</th>
+                    <th className="p-4 w-32">Location (Ref)</th>
+                    <th className="p-4">Obviousness / Rationale Explanation</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-sm">
+                  {chartRows.map((row, idx) => (
+                    <tr key={idx} className="hover:bg-slate-900/20">
+                      <td className="p-4 font-mono font-bold text-indigo-400 align-top">{row.element_id}</td>
+                      <td className="p-4 text-slate-300 leading-relaxed text-xs align-top">{row.claim_text}</td>
+                      <td className="p-4 align-top">
+                        {isEditingChart ? (
+                          <textarea
+                            value={row.cited_passage}
+                            onChange={(e) => handleUpdateChartRow(idx, "cited_passage", e.target.value)}
+                            rows={3}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs focus:outline-none focus:border-indigo-500 font-mono text-slate-300"
+                          />
+                        ) : (
+                          <p className="text-slate-400 leading-relaxed text-xs italic">"{row.cited_passage}"</p>
+                        )}
+                      </td>
+                      <td className="p-4 align-top font-mono text-xs space-y-1">
+                        {isEditingChart ? (
+                          <React.Fragment>
+                            <input
+                              type="text"
+                              value={row.para_ref}
+                              onChange={(e) => handleUpdateChartRow(idx, "para_ref", e.target.value)}
+                              placeholder="Para"
+                              className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-xxs font-bold text-slate-300 focus:outline-none"
+                            />
+                            <input
+                              type="text"
+                              value={row.fig_ref}
+                              onChange={(e) => handleUpdateChartRow(idx, "fig_ref", e.target.value)}
+                              placeholder="Figure"
+                              className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-xxs font-bold text-slate-300 focus:outline-none mt-1"
+                            />
+                          </React.Fragment>
+                        ) : (
+                          <React.Fragment>
+                            <div>Para: {row.para_ref || "N/A"}</div>
+                            <div>Fig: {row.fig_ref || "N/A"}</div>
+                          </React.Fragment>
+                        )}
+                      </td>
+                      <td className="p-4 align-top">
+                        {isEditingChart ? (
+                          <textarea
+                            value={row.rationale}
+                            onChange={(e) => handleUpdateChartRow(idx, "rationale", e.target.value)}
+                            rows={4}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs focus:outline-none focus:border-indigo-500 text-slate-300"
+                          />
+                        ) : (
+                          <p className="text-slate-300 leading-relaxed text-xs">{row.rationale}</p>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
