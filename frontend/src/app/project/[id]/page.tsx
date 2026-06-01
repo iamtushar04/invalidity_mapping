@@ -6,7 +6,7 @@ import {
   FileText, CheckSquare, Layers, Database, Play,
   Table as TableIcon, FileDown, ArrowLeft, Plus,
   Trash2, Loader2, Sparkles, AlertCircle, Check,
-  Edit3, ShieldAlert
+  Edit3, ShieldAlert, LogOut
 } from "lucide-react";
 
 import useClaimSplit from "@/hooks/useClaimSplit";
@@ -73,6 +73,12 @@ export default function ProjectAnalysisPage() {
     setToken(storedToken);
     fetchProject(storedToken);
   }, []);
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    setToken(null);
+    router.push("/");
+  };
 
   const fetchProject = async (authToken: string) => {
     try {
@@ -569,31 +575,41 @@ export default function ProjectAnalysisPage() {
           </div>
         </div>
 
-        <div className="hidden lg:flex items-center gap-2 text-xs font-semibold text-slate-400">
-          {[
-            { stepNum: 0, label: "Ingest" },
-            { stepNum: 1, label: "Review" },
-            { stepNum: 2, label: "Claims" },
-            { stepNum: 3, label: "Weights" },
-            { stepNum: 4, label: "Prior Art" },
-            { stepNum: 5, label: "Matrix" },
-            { stepNum: 6, label: "Chart" }
-          ].map((item) => (
-            <React.Fragment key={item.stepNum}>
-              <div
-                onClick={() => {
-                  if (patentData) setStep(item.stepNum);
-                }}
-                className={`px-3 py-1.5 rounded-lg cursor-pointer transition-all duration-300 border ${step === item.stepNum
-                  ? "bg-indigo-600/20 text-indigo-300 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.15)]"
-                  : "bg-slate-900/60 border-transparent hover:border-slate-700 text-slate-500"
-                  }`}
-              >
-                {item.label}
-              </div>
-              {item.stepNum < 6 && <div className="w-1 h-0.5 bg-slate-800" />}
-            </React.Fragment>
-          ))}
+        <div className="flex items-center gap-6">
+          <div className="hidden lg:flex items-center gap-2 text-xs font-semibold text-slate-400">
+            {[
+              { stepNum: 0, label: "Ingest" },
+              { stepNum: 1, label: "Review" },
+              { stepNum: 2, label: "Claims" },
+              { stepNum: 3, label: "Weights" },
+              { stepNum: 4, label: "Prior Art" },
+              { stepNum: 5, label: "Matrix" },
+              { stepNum: 6, label: "Chart" }
+            ].map((item) => (
+              <React.Fragment key={item.stepNum}>
+                <div
+                  onClick={() => {
+                    if (patentData) setStep(item.stepNum);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg cursor-pointer transition-all duration-300 border ${step === item.stepNum
+                    ? "bg-indigo-600/20 text-indigo-300 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.15)]"
+                    : "bg-slate-900/60 border-transparent hover:border-slate-700 text-slate-500"
+                    }`}
+                >
+                  {item.label}
+                </div>
+                {item.stepNum < 6 && <div className="w-1 h-0.5 bg-slate-800" />}
+              </React.Fragment>
+            ))}
+          </div>
+          
+          <button
+            onClick={handleLogout}
+            className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-400/10 transition-colors flex items-center gap-2"
+            title="Logout"
+          >
+            <LogOut className="w-5 h-5" />
+          </button>
         </div>
       </header>
 

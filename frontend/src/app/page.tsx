@@ -3,9 +3,10 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Sparkles, FileText, Plus, Folder, ArrowRight,
-  Lock, Mail, UserPlus, LogIn, Loader2
+  Sparkles, Plus, Folder, ArrowRight,
+  Lock, Mail, LogIn, Loader2, Eye, EyeOff
 } from "lucide-react";
+import OtpInput from "../components/OtpInput";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL as string;
 const AUTH_URL = process.env.NEXT_PUBLIC_AUTH_URL as string;
@@ -17,7 +18,10 @@ export default function HomePage() {
   const [token, setToken] = useState<string | null>(null);
   const [email, setEmail] = useState<string>("");
   const [password, setPassword] = useState<string>("");
+  const [showPassword, setShowPassword] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isOtpWindow, setIsOtpWindow] = useState<boolean>(false);
+  const [otp, setOtp] = useState<string[]>(Array(6).fill(""));
 
   // Projects state
   const [projects, setProjects] = useState<any[]>([]);
@@ -62,12 +66,50 @@ export default function HomePage() {
         body: JSON.stringify({ email: email, password: password })
       });
       if (!res.ok) {
+        if (res.status === 400) {
+          setIsOtpWindow(true);
+          return;
+        }
         const data = await res.json();
         throw new Error(data.detail || "Invalid credentials.");
       }
       const data = await res.json();
       localStorage.setItem("token", data.access_token);
       setToken(data.access_token);
+      fetchProjects(data.access_token);
+    } catch (err: any) {
+      setAuthError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOtpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const otpValue = otp.join("");
+    if (otpValue.length !== 6) {
+      setAuthError("Please enter the complete OTP.");
+      return;
+    }
+
+    setLoading(true);
+    setAuthError(null);
+
+    try {
+      const res = await fetch(AUTH_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email, password: password, totp_token: otpValue })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "OTP verification failed.");
+      }
+      const data = await res.json();
+      localStorage.setItem("token", data.access_token);
+      setToken(data.access_token);
+      setIsOtpWindow(false);
+      setOtp(Array(6).fill(""));
       fetchProjects(data.access_token);
     } catch (err: any) {
       setAuthError(err.message);
@@ -133,57 +175,106 @@ export default function HomePage() {
 
       <div className="w-full max-w-lg bg-slate-950/40 border border-slate-800/80 rounded-3xl p-8 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] relative z-10">
         {!token ? (
-          <form onSubmit={handleAuth} className="space-y-5">
-            <h2 className="text-2xl font-bold text-center text-indigo-100 flex items-center justify-center gap-2">
-              <LogIn className="w-6 h-6" />
-              Analyst Authentication
-            </h2>
+          !isOtpWindow ? (
+            <form onSubmit={handleAuth} className="space-y-5">
+              <h2 className="text-2xl font-bold text-center text-indigo-100 flex items-center justify-center gap-2">
+                <LogIn className="w-6 h-6" />
+                Analyst Authentication
+              </h2>
 
-            {authError && (
-              <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-xs font-semibold text-center leading-relaxed">
-                {authError}
-              </div>
-            )}
+              {authError && (
+                <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-xs font-semibold text-center leading-relaxed">
+                  {authError}
+                </div>
+              )}
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Email Address</label>
-                <div className="relative">
-                  <Mail className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-500" />
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="analyst@firm.com"
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-11 pr-4 py-3 focus:outline-none focus:border-indigo-500 transition font-mono text-sm"
-                  />
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Email Address</label>
+                  <div className="relative">
+                    <Mail className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-500" />
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="analyst@firm.com"
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-11 pr-4 py-3 focus:outline-none focus:border-indigo-500 transition font-mono text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Secret Key / Password</label>
+                  <div className="relative">
+                    <Lock className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-500" />
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-11 pr-12 py-3 focus:outline-none focus:border-indigo-500 transition font-mono text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3.5 top-3.5 text-slate-500 hover:text-slate-300 transition-colors"
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Secret Key / Password</label>
-                <div className="relative">
-                  <Lock className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-500" />
-                  <input
-                    type="password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-11 pr-4 py-3 focus:outline-none focus:border-indigo-500 transition font-mono text-sm"
-                  />
-                </div>
-              </div>
-            </div>
+              <button
+                type="submit"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-bold transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 mt-6 text-sm"
+              >
+                Authenticate Session
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleOtpSubmit} className="space-y-5">
+              <h2 className="text-2xl font-bold text-center text-indigo-100 flex items-center justify-center gap-2 mb-2">
+                <Lock className="w-6 h-6" />
+                OTP Verification
+              </h2>
 
-            <button
-              type="submit"
-              className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-bold transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 mt-6 text-sm"
-            >
-              Authenticate Session
-            </button>
-          </form>
+              <p className="text-center text-sm text-slate-400 mb-6">
+                Please enter the 6-digit code sent to your email or authenticator app.
+              </p>
+
+              {authError && (
+                <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-xs font-semibold text-center leading-relaxed mb-4">
+                  {authError}
+                </div>
+              )}
+
+              <OtpInput otp={otp} setOtp={setOtp} />
+
+              <div className="flex gap-4 mt-6">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsOtpWindow(false);
+                    setAuthError(null);
+                    setOtp(Array(6).fill(""));
+                  }}
+                  className="w-full bg-slate-800 hover:bg-slate-700 py-3 rounded-xl font-bold transition flex items-center justify-center gap-2 text-sm text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-bold transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 text-sm"
+                >
+                  Verify
+                </button>
+              </div>
+            </form>
+          )
         ) : (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
