@@ -7,7 +7,11 @@ from app.database import get_db
 from app.core.security import decode_access_token
 from app.models.user import User
 
+from app.core.logger import current_user_id
 from app.core.config import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=settings.AUTH_URL)
 
@@ -38,7 +42,10 @@ async def get_current_user(
             db.add(user)
             await db.commit()
             await db.refresh(user)
+            logger.info(f"First-time login detected on this microservice! Created local user stub for {user_id}")
         except Exception:
             raise credentials_exception
         
+    current_user_id.set(str(user.id))
+    logger.debug("User token authenticated successfully.")
     return user

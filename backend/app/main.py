@@ -1,5 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+from app.core.logger import setup_logger, current_project_id
+setup_logger()
 
 from app.core.config import settings
 from app.database import engine, Base
@@ -18,6 +23,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class ProjectContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Extract potential UUID from URL path
+        project_id = None
+        for part in request.url.path.split('/'):
+            if len(part) == 36 and part.count('-') == 4:
+                project_id = part
+                break
+        
+        # Reset context on every request to avoid leakage between async requests
+        current_project_id.set(project_id)
+        return await call_next(request)
+
+app.add_middleware(ProjectContextMiddleware)
 
 @app.on_event("startup")
 async def on_startup():

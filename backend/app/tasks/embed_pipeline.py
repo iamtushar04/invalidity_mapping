@@ -17,6 +17,7 @@ FETCH_SEMAPHORE = asyncio.Semaphore(5)
 # We can embed 1 patent at a time on the CPU to avoid GIL thrashing and maximize speed
 EMBED_SEMAPHORE = asyncio.Semaphore(1)
 
+from app.core.logger import current_user_id, current_project_id
 from sqlalchemy import update
 from app.database import SessionLocal
 from app.models.patent import Patent
@@ -28,10 +29,17 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
     Updates Redis status at each step, and Postgres when fetched.
     Automatically retries on failure.
     """
+    # 0. Set context for the dynamic logger!
+    current_user_id.set(user_id)
+    current_project_id.set(project_id)
+    
+    logger.info(f"Starting pipeline for patent {patent_number}")
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
             # 1. Fetching Phase
+            logger.info("Step 1: Setting status to fetching")
             await set_embed_status(project_id, patent_number, "fetching")
             
             async with FETCH_SEMAPHORE:
@@ -42,7 +50,7 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
 
                 # 1b. Fetch LLM enriched data (needed for Postgres DB)
                 enriched_data = await patent_fetch_service.fetch_patent(patent_number)
-                
+            print(raw_data, "RAW DATA")
             # Parse data out of the raw fetch results for Qdrant
             s_abstract = get_abstract(raw_data)
             s_claims = convert_claims(raw_data)
@@ -70,6 +78,7 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                 await db.commit()
 
             # 2. Embedding Phase
+            logger.info("Step 2: Saving to Qdrant embedding database...")
             await set_embed_status(project_id, patent_number, "embedding")
             async with EMBED_SEMAPHORE:
                 await embed_patent(
@@ -82,6 +91,7 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                 )
 
             # 3. Done
+            logger.info("Step 3: Pipeline completed successfully.")
             await set_embed_status(project_id, patent_number, "done")
             return  # Exit the loop on success
             

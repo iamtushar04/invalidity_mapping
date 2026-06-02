@@ -12,6 +12,9 @@ import uuid
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.embedding.text_utils import (
@@ -152,6 +155,9 @@ async def embed_patent(
     _ensure_collection()
 
     canonical_patent = normalize_patent_number(patent_number)
+    
+    logger.info(f"Starting Qdrant vector embedding process for patent {canonical_patent}")
+    logger.info("Checking for existing embeddings (Deduplication check)...")
 
     # ---- 1️⃣ Deduplication (scoped to project + user + patent) ----------------
     # user_id is included so that a re-embed with a different user_id is never
@@ -178,12 +184,14 @@ async def embed_patent(
     )
 
     if records:
+        logger.info(f"Patent {canonical_patent} already embedded in Qdrant for this project. Skipping.")
         print(f"{canonical_patent} already embedded in project {project_id}")
         return
 
     points: List[PointStruct] = []
 
     # ---- 2️⃣ Abstract ------------------------------------------------------
+    logger.info("Processing abstract embedding...")
     abstract_text = abstract_data.get("abstract", "")
     if not _skip(abstract_text):
         vec = _embed_text(abstract_text)
@@ -205,6 +213,7 @@ async def embed_patent(
 
     # ---- 3️⃣ Claims --------------------------------------------------------
     # ``claims_data`` first element is metadata – skip it.
+    logger.info(f"Processing {len(claims_data)} claim entries for embedding...")
     for claim in claims_data:
         if claim.get("type") == "metadata":
             continue
@@ -252,6 +261,7 @@ async def embed_patent(
             ))
 
     # ---- 4️⃣ Description chunks -------------------------------------------
+    logger.info(f"Processing {len(description_data)} description chunks for embedding...")
     for chunk in description_data:
         if chunk.get("type") == "metadata":
             continue
@@ -282,7 +292,9 @@ async def embed_patent(
 
     # ---- 5️⃣ Bulk upsert ---------------------------------------------------
     if points:
+        logger.info(f"Pushing {len(points)} generated vectors to Qdrant cluster...")
         _CLIENT.upsert(collection_name=_COLLECTION_NAME, points=points)
+        logger.info(f"Successfully finished embedding and upserting patent {canonical_patent}")
 
 async def search_element_in_prior_art(
     element_text: str,

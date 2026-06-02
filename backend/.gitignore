@@ -11,3 +11,4 @@ wheels/
 .env
 __pycache__
 /testing/
+/logs/

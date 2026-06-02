@@ -12,12 +12,12 @@ services:
       - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
-    environment:
-      - REDIS_URL=redis://redis:6379
+    # environment:
+    #   - REDIS_URL=redis://redis:6379
     env_file:
       - ./backend/.env
-    depends_on:
-      - redis
+    # depends_on:
+    #   - redis
 
   frontend:
     build:
@@ -36,10 +36,10 @@ services:
       # <-- ADD THIS SECTION
       - WATCHPACK_POLLING=true # Forces Next.js to detect file changes on Windows
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
 
   # qdrant service disabled — using remote Qdrant via SSH tunnel on host port 6333
   # qdrant:

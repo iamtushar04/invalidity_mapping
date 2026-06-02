@@ -7,15 +7,20 @@ from app.models.claim import Claim
 from app.models.mapping import ClaimElement
 from app.database import SessionLocal
 from sqlalchemy import select, delete
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Service function to process a list of claim ids and assign weights via LLM
 async def split_claims_via_llm(project_id: str, claim_ids: List[str]) -> Dict[str, List[Dict]]:
     """Return a mapping claim_id -> list of element dicts with weight.
     Each element dict: {"element_id": str, "text": str, "weight": float}
     """
+    logger.info(f"Step 1: Starting LLM claim split for {len(claim_ids)} claims.")
     results: Dict[str, List[Dict]] = {}
     async with SessionLocal() as db:
         for claim_id in claim_ids:
+            logger.info(f"Step 2: Processing claim_id {claim_id}")
             # fetch claim text
             result = await db.execute(select(Claim).where(Claim.id == claim_id))
             claim: Claim = result.scalars().first()
@@ -49,6 +54,7 @@ Output format:
 Claim text:
 {claim.claim_text}"""
             # LLM call with retries
+            logger.info("Step 3: Sending claim text to LLM...")
             response_text = await limited_call(lambda: llm_client.chat_completion(
                 prompt,
                 system_prompt="You are a senior patent attorney. Return only valid JSON, no markdown.",
@@ -76,7 +82,10 @@ Claim text:
                 parsed = json.loads(raw)
                 elements = parsed.get("elements", [])
             except Exception as e:
+                logger.error(f"Failed to parse LLM response: {e}")
                 raise ValueError(f"Failed to parse LLM response for claim {claim_id}: {e}")
+            
+            logger.info("Step 4: LLM response parsed successfully. Normalizing weights...")
             # Mathematically normalize weights using Largest Remainder Method so they sum to exactly 100 integers
             raw_weights = [clamp_weight(el.get("weight", 0)) for el in elements]
             total_weight = sum(raw_weights)
@@ -105,6 +114,7 @@ Claim text:
             # Clear existing elements to avoid primary/unique key conflicts
             await db.execute(delete(ClaimElement).where(ClaimElement.claim_id == claim_id))
             
+            logger.info(f"Step 5: Processed {len(elements)} elements. Saving to database...")
             # persist to DB as ClaimElement
             for el in elements:
                 weight = el.get("weight", 0)
@@ -128,5 +138,8 @@ Claim text:
                 )
                 db.add(ce)
             await db.commit()
+            logger.info(f"Successfully finished processing claim {claim_id}")
             results[claim_id] = elements
+            
+    logger.info("Claim split process finished completely.")
     return results

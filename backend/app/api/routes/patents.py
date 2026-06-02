@@ -21,6 +21,15 @@ async def ingest_patent(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    from app.core.logger import current_project_id
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Set the context manually since the middleware doesn't catch project_id from the JSON payload
+    current_project_id.set(str(req.project_id))
+    
+    logger.info(f"Step 1: Starting ingestion for patent {req.patent_number}")
+    
     # Verify project ownership
     res_proj = await db.execute(
         select(Project).where(Project.id == req.project_id, Project.user_id == current_user.id)
@@ -33,6 +42,7 @@ async def ingest_patent(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
     
     
+    logger.info("Step 2: Project verified. Fetching patent data from external API...")
     # Fetch patent details (with retry logic — raises ValueError on total failure)
     try:
         patent_data = await patent_fetch_service.fetch_patent(req.patent_number)
@@ -42,6 +52,7 @@ async def ingest_patent(
             detail=f"Failed to fetch patent from external API: {e}"
         )
     
+    logger.info("Step 3: Data fetched successfully. Storing patent record...")
     # Store patent record
     patent = Patent(
         project_id=req.project_id,
@@ -59,6 +70,7 @@ async def ingest_patent(
     db.add(patent)
     await db.flush() # Flush to get patent.id
     
+    logger.info(f"Step 4: Creating {len(patent_data['claims'])} claim records...")
     # Create claims records
     for c in patent_data["claims"]:
         claim = Claim(
@@ -71,6 +83,8 @@ async def ingest_patent(
         db.add(claim)
     
 
+    
+    logger.info("Step 5: Updating project association...")
     # Update project association
     project.subject_patent_id = patent.id
     
@@ -82,6 +96,7 @@ async def ingest_patent(
         .options(selectinload(Patent.claims))
         .where(Patent.id == patent.id)
     )
+    logger.info("Ingestion completed successfully.")
     return res_pat.scalars().first()
 
 @router.get("/project/{project_id}", response_model=PatentResponse)

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Dedicated engine for background threads to avoid session collision
 bg_engine = create_async_engine(settings.DATABASE_URL)
 bg_session_maker = async_sessionmaker(bind=bg_engine, class_=AsyncSession, expire_on_commit=False)
+from app.core.logger import current_project_id, current_user_id
 
 async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
     async with bg_session_maker() as db:
@@ -31,6 +32,12 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                 logger.warning("Project %s not found. Terminating obviousness task.", project_id)
                 return
             user_id = str(project.user_id)
+            
+            # Set context for the dynamic logger so it writes to the correct files!
+            current_project_id.set(str(project_id))
+            current_user_id.set(user_id)
+            
+            logger.info("Starting background obviousness mapping task...")
 
             # 1. Fetch reference patents
             res_pat = await db.execute(
@@ -264,11 +271,14 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                         elif cls == "Obviousness": impact = 0.75
                         elif cls in ("Partial", "P"): impact = 0.50
                         
+                        logger.info(f"Score Calculation: Element {el.id} classified as '{cls}'. Impact factor: {impact}. Weight: {el.weight}.")
                         weighted_score += float(el.weight) * impact
                         
                     # Normalize the score to be out of 100%
                     total_weight = sum(float(el.weight) for el in elements)
                     final_score = (weighted_score / total_weight * 100.0) if total_weight > 0 else 0.0
+                    
+                    logger.info(f"Score Calculation Complete: Final obviousness score against patent {patent_number} is {final_score:.2f}% (Total weight considered: {total_weight})")
                     
                     # Save calculated obviousness score
                     res_sc = await db.execute(

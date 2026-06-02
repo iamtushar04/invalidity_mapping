@@ -18,11 +18,18 @@ async def create_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    print("CURRENT USER ID:", current_user.id)
+    import logging
+    from app.core.logger import current_project_id
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"User is requesting to create a new project named: {project_in.name}")
     project = Project(name=project_in.name, user_id=current_user.id)
     db.add(project)
     await db.commit()
     await db.refresh(project)
+    
+    current_project_id.set(str(project.id))
+    logger.info(f"Successfully created project '{project.name}' with ID: {project.id}")
     return project
 
 @router.get("", response_model=List[ProjectResponse])
