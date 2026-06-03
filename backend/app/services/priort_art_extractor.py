@@ -59,8 +59,10 @@ async def fetch_patent_data(patent_number: str) -> dict[str, Any] | dict[str, st
 
                     else:
                         body = await response.aread()
-                        logger.error(f"HTTP error: {response.status_code}, message: {body.decode('utf-8', errors='replace')[:200]}")
-                        return {"error_message": f"HTTP error {response.status_code}"}
+                        body_text = body.decode('utf-8', errors='replace')
+                        logger.error(f"HTTP error: {response.status_code}, message: {body_text[:200]}")
+                        return {"error_message": f"HTTP error {response.status_code}: {body_text}"}
+
 
         except httpx.RequestError as e:
             logger.warning(f"Attempt {attempt + 1} failed with network error: {e}. Retrying...")

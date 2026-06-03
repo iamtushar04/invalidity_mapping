@@ -40,8 +40,14 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
             logger.info("Starting background obviousness mapping task...")
 
             # 1. Fetch reference patents
+            # Only fetch patents that have successfully completed the embedding pipeline!
+            # Ignoring 'failed', 'pending', and 'fetching' patents prevents 409 Conflict crashes.
             res_pat = await db.execute(
-                select(Patent).where(Patent.project_id == project_id, Patent.is_reference == True)
+                select(Patent).where(
+                    Patent.project_id == project_id, 
+                    Patent.is_reference == True,
+                    Patent.fetch_status == "success"
+                )
             )
             references = res_pat.scalars().all()
             

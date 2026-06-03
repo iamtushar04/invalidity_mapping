@@ -444,8 +444,21 @@ export default function ProjectAnalysisPage() {
         headers: { Authorization: `Bearer ${token}` },
         body: formData
       });
-      if (!res.ok) throw new Error("Failed to upload excel spreadsheet.");
-      setUploadMsg("Spreadsheet parsed and queued! Refresh list in 3 seconds.");
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || "Failed to upload excel spreadsheet.");
+      }
+      
+      const data = await res.json();
+      if (data.status === "duplicate") {
+        throw new Error(data.message || "Patents are already present.");
+      }
+      
+      if (data.duplicates_skipped > 0) {
+        setUploadMsg(`${data.count} queued. ${data.duplicates_skipped} duplicates skipped.`);
+      } else {
+        setUploadMsg("Spreadsheet parsed and queued! Refresh list in 3 seconds.");
+      }
       setTimeout(fetchPriorArt, 3000);
     } catch (err: any) {
       setError(err.message);

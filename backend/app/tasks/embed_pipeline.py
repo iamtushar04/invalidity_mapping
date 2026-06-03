@@ -1,4 +1,5 @@
 import asyncio
+import random
 import logging
 from app.services.patent_fetch import patent_fetch_service
 from app.embedding.qdrant_service import embed_patent
@@ -62,7 +63,10 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
             )
             canonical_patent = normalize_patent_number(raw_data.get("patent_number") or patent_number)
 
-            # Update Postgres DB with the LLM enriched data
+            # Save enriched metadata to Postgres (title, abstract, etc.)
+            # NOTE: fetch_status stays as "fetching" here — we ONLY set it to "success"
+            # AFTER Qdrant embedding succeeds below. This prevents the desync bug where
+            # Postgres says "success" but Qdrant has no data due to a connection failure.
             async with SessionLocal() as db:
                 await db.execute(
                     update(Patent)
@@ -71,17 +75,15 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                         title=enriched_data.get("title", ""),
                         abstract=enriched_data.get("abstract", ""),
                         assignee=enriched_data.get("assignee", ""),
-                        fetch_status="success",
+                        fetch_status="fetching",  # Still in progress — Qdrant not done yet
                         structured_summary=enriched_data.get("structured_summary", {}),
                     )
                 )
                 await db.commit()
 
-            # 2. Embedding Phase
+            # 2. Embedding Phase — Qdrant MUST succeed before we mark "success"
             logger.info("Step 2: Saving to Qdrant embedding database...")
             await set_embed_status(project_id, patent_number, "embedding")
-            # Since this background job only runs for new or retried patents, 
-            # we should ALWAYS wipe any partial Qdrant data before starting.
             force_reembed = True
 
             async with EMBED_SEMAPHORE:
@@ -95,21 +97,35 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                     force_reembed=force_reembed
                 )
 
-            # 3. Done
+            # 3. Qdrant succeeded — NOW we can safely mark Postgres as "success"
             logger.info("Step 3: Pipeline completed successfully.")
+            async with SessionLocal() as db:
+                await db.execute(
+                    update(Patent)
+                    .where(Patent.project_id == project_id, Patent.patent_number == patent_number)
+                    .values(fetch_status="success")
+                )
+                await db.commit()
             await set_embed_status(project_id, patent_number, "done")
             return  # Exit the loop on success
             
         except Exception as e:
+            error_msg = str(e).lower()
             logger.error(f"Attempt {attempt + 1}/{max_retries} failed for patent {patent_number}: {e}")
-            if attempt < max_retries - 1:
-                # Put it back to pending and wait 60 seconds before retrying
-                await set_embed_status(project_id, patent_number, "pending")
-                await asyncio.sleep(60)
-            else:
-                # Final failure after max retries
+            
+            # --- FAST FAILURE (Non-Retryable Errors) ---
+            fatal_keywords = [
+                "404", "unauthorized", "401", "403", "forbidden", 
+                "authentication", "insufficient_quota", "collection not found"
+            ]
+            is_fatal = any(keyword in error_msg for keyword in fatal_keywords)
+            
+            if is_fatal or attempt >= max_retries - 1:
+                if is_fatal:
+                    logger.error(f"Fatal error detected for {patent_number}. Skipping retries. Error: {e}")
+                
+                # Final failure (either fatal or out of retries)
                 await set_embed_status(project_id, patent_number, "failed")
-                # Update Postgres on final failure
                 try:
                     async with SessionLocal() as db:
                         await db.execute(
@@ -120,6 +136,18 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                         await db.commit()
                 except Exception as db_err:
                     logger.error(f"Failed to update db status for {patent_number}: {db_err}")
+                
+                return  # Exit the loop entirely on fatal error or max retries
+            # -------------------------------------------
+
+            # If it's a temporary error and we have retries left, wait and retry
+            # Exponential backoff: 30s on attempt 1, 60s on attempt 2.
+            # Jitter: adds a random 0-15s offset so 200 patents don't all
+            # wake up at the same millisecond and hammer the external API.
+            await set_embed_status(project_id, patent_number, "pending")
+            sleep_time = (30 * (attempt + 1)) + random.uniform(0, 15)
+            logger.info(f"Retrying patent {patent_number} in {sleep_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(sleep_time)
 
 async def background_batch_embed(project_id: str, user_id: str, patent_numbers: list[str]):
     """
@@ -137,4 +165,23 @@ async def background_batch_embed(project_id: str, user_id: str, patent_numbers: 
         _pipeline_fetch_and_embed(project_id, user_id, p)
         for p in patent_numbers
     ]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # SAFETY NET: Check if any tasks crashed catastrophically and returned an Exception object
+    for idx, result in enumerate(results):
+        if isinstance(result, Exception):
+            stuck_patent = patent_numbers[idx]
+            logger.error(f"CRITICAL PIPELINE ERROR: Unhandled exception escaped for patent {stuck_patent}. Exception: {result}")
+            
+            # Force status to failed so the UI doesn't spin forever
+            try:
+                await set_embed_status(project_id, stuck_patent, "failed")
+                async with SessionLocal() as db:
+                    await db.execute(
+                        update(Patent)
+                        .where(Patent.project_id == project_id, Patent.patent_number == stuck_patent)
+                        .values(fetch_status="failed")
+                    )
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed to force failure status for stuck patent {stuck_patent}: {e}")

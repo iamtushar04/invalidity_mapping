@@ -14,7 +14,8 @@ engine = create_async_engine(
     echo=False,
     pool_size=20,
     max_overflow=30,
-    pool_timeout=60.0
+    pool_timeout=60.0,
+    pool_recycle=300 # Automatically recycle idle connections every 5 minutes
 )
 
 @event.listens_for(engine.sync_engine, "before_cursor_execute")

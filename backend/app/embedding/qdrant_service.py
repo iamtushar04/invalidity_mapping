@@ -9,6 +9,7 @@ from qdrant_client.models import VectorParams, Distance
 import os
 from typing import Any, Dict, List
 import uuid
+import asyncio
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
@@ -164,11 +165,13 @@ async def embed_patent(
     # ---- 1️⃣ Deduplication (scoped to project + user + patent) ----------------
     if force_reembed:
         logger.info(f"Force re-embed requested for {canonical_patent}. Wiping existing vectors from Qdrant.")
-        _CLIENT.delete(
+        await asyncio.to_thread(
+            _CLIENT.delete,
             collection_name=_COLLECTION_NAME,
             points_selector=Filter(
                 must=[
                     FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
+                    FieldCondition(key="user_id", match=MatchValue(value=str(user_id))),
                     FieldCondition(key="patent_number", match=MatchValue(value=canonical_patent)),
                 ]
             )
@@ -176,7 +179,8 @@ async def embed_patent(
     else:
         # user_id is included so that a re-embed with a different user_id is never
         # silently skipped — the search filter also requires user_id to match.
-        records, _ = _CLIENT.scroll(
+        records, _ = await asyncio.to_thread(
+            _CLIENT.scroll,
             collection_name=_COLLECTION_NAME,
             scroll_filter=Filter(
                 must=[
@@ -306,7 +310,7 @@ async def embed_patent(
     # ---- 5️⃣ Bulk upsert ---------------------------------------------------
     if points:
         logger.info(f"Pushing {len(points)} generated vectors to Qdrant cluster...")
-        _CLIENT.upsert(collection_name=_COLLECTION_NAME, points=points)
+        await asyncio.to_thread(_CLIENT.upsert, collection_name=_COLLECTION_NAME, points=points)
     
     logger.info(f"Successfully finished embedding and upserting patent {canonical_patent}")
     return False

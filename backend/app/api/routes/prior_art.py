@@ -22,7 +22,7 @@ from app.models.user import User
 from app.services.priort_art_extractor import fetch_patent_data
 from app.services.get_structured_claims import convert_claims
 from app.tasks.embed_pipeline import background_batch_embed
-from app.services.redis_service import get_all_embed_statuses, set_embed_status
+from app.services.redis_service import get_all_embed_statuses, get_embed_status, set_embed_status
 router = APIRouter()
 
 from pydantic import BaseModel
@@ -62,8 +62,25 @@ async def queue_prior_art_numbers(
         if existing_patent:
             if existing_patent.fetch_status == "failed":
                 # Automatically retry failed patents instead of calling them duplicates
+                existing_patent.fetch_status = "pending"
+                await set_embed_status(str(project_id), num, "pending")
                 added_numbers.append(num)
                 continue
+            elif existing_patent.fetch_status == "success":
+                # Fix #3: Check for desync — Postgres says "success" but Redis shows
+                # an active stale status, meaning Qdrant embedding never completed.
+                redis_status = await get_embed_status(str(project_id), num)
+                if redis_status in ("fetching", "pending", "embedding"):
+                    # Desync detected — treat as failed and re-queue
+                    logger.warning(f"Desync detected for patent {num}: Postgres=success but Redis={redis_status}. Re-queuing.")
+                    existing_patent.fetch_status = "pending"
+                    await set_embed_status(str(project_id), num, "pending")
+                    added_numbers.append(num)
+                    continue
+                else:
+                    # Genuinely successful — treat as duplicate
+                    duplicate_numbers.append(num)
+                    continue
             else:
                 duplicate_numbers.append(num)
                 continue
@@ -143,13 +160,23 @@ async def upload_prior_art_excel(
         )
         
     added_numbers = []
+    duplicate_numbers = []
     for num in numbers:
         # Check if already added
         res_pat = await db.execute(
             select(Patent).where(Patent.project_id == project_id, Patent.patent_number == num)
         )
-        if res_pat.scalars().first():
-            continue
+        existing_patent = res_pat.scalars().first()
+        if existing_patent:
+            if existing_patent.fetch_status == "failed":
+                # Automatically retry failed patents in excel upload as well
+                existing_patent.fetch_status = "pending"
+                await set_embed_status(str(project_id), num, "pending")
+                added_numbers.append(num)
+                continue
+            else:
+                duplicate_numbers.append(num)
+                continue
             
         patent = Patent(
             project_id=project_id,
@@ -170,8 +197,13 @@ async def upload_prior_art_excel(
             str(current_user.id), 
             added_numbers
         )
+    elif duplicate_numbers:
+        if len(numbers) == 1:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Patent {numbers[0]} is already present in this project.")
+        else:
+            return {"status": "duplicate", "message": "All provided patents are already present.", "duplicates_skipped": len(duplicate_numbers)}
 
-    return {"status": "parsed_and_queued", "count": len(numbers)}
+    return {"status": "queued", "count": len(added_numbers), "duplicates_skipped": len(duplicate_numbers)}
 
 @router.post("/{project_id}/patent/{patent_number}/embed", status_code=status.HTTP_200_OK)
 async def embed_single_patent(

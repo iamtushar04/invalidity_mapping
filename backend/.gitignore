@@ -12,3 +12,4 @@ wheels/
 __pycache__
 /testing/
 /logs/
+.backend.log
