@@ -26,6 +26,30 @@ async def split_claims_via_llm(project_id: str, claim_ids: List[str]) -> Dict[st
             claim: Claim = result.scalars().first()
             if not claim:
                 continue
+                
+            # --- THE NEW CACHE CHECK ---
+            # Check if this claim has already been split and saved in the database
+            existing_elements_res = await db.execute(
+                select(ClaimElement).where(ClaimElement.claim_id == claim_id).order_by(ClaimElement.element_id)
+            )
+            existing_elements = existing_elements_res.scalars().all()
+            
+            if existing_elements:
+                logger.info(f"Found {len(existing_elements)} existing elements in DB for claim {claim_id}. Skipping LLM.")
+                
+                # Reconstruct the exact JSON dictionary the frontend expects
+                saved_elements = []
+                for el in existing_elements:
+                    saved_elements.append({
+                        "element_id": el.element_id,
+                        "text": el.text,
+                        "weight": float(el.weight) if el.weight else 0.0
+                    })
+                
+                results[claim_id] = saved_elements
+                continue  # Instantly skip to the next claim in the list!
+            # ---------------------------
+            
             prompt = f"""You are a senior patent attorney conducting invalidity analysis.
 
 Analyze the following patent claim. Extract each distinct claim limitation as a separate element.

@@ -39,7 +39,8 @@ _CLIENT = QdrantClient(
     host=_QDRANT_HOST,
     port=_QDRANT_PORT,
     api_key=_QDRANT_API_KEY if _QDRANT_API_KEY else None,
-    https=False
+    https=False,
+    timeout=3600.0  # 1 hour timeout (effectively waits until done)
 )
 
 _COLLECTION_NAME = "matrix_mapping_wissen"
@@ -146,7 +147,8 @@ async def embed_patent(
     description_data: List[Dict[str, Any]],
     project_id: str,
     user_id: str | None = None,
-) -> None:
+    force_reembed: bool = False,
+) -> bool:
     """Embed a single patent and upsert all vectors into Qdrant.
 
     The function is **idempotent** per project – if any point with this
@@ -160,33 +162,44 @@ async def embed_patent(
     logger.info("Checking for existing embeddings (Deduplication check)...")
 
     # ---- 1️⃣ Deduplication (scoped to project + user + patent) ----------------
-    # user_id is included so that a re-embed with a different user_id is never
-    # silently skipped — the search filter also requires user_id to match.
-    records, _ = _CLIENT.scroll(
-        collection_name=_COLLECTION_NAME,
-        scroll_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="project_id",
-                    match=MatchValue(value=str(project_id)),
-                ),
-                FieldCondition(
-                    key="user_id",
-                    match=MatchValue(value=str(user_id)),
-                ),
-                FieldCondition(
-                    key="patent_number",
-                    match=MatchValue(value=canonical_patent),
-                ),
-            ]
-        ),
-        limit=1,
-    )
+    if force_reembed:
+        logger.info(f"Force re-embed requested for {canonical_patent}. Wiping existing vectors from Qdrant.")
+        _CLIENT.delete(
+            collection_name=_COLLECTION_NAME,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
+                    FieldCondition(key="patent_number", match=MatchValue(value=canonical_patent)),
+                ]
+            )
+        )
+    else:
+        # user_id is included so that a re-embed with a different user_id is never
+        # silently skipped — the search filter also requires user_id to match.
+        records, _ = _CLIENT.scroll(
+            collection_name=_COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="project_id",
+                        match=MatchValue(value=str(project_id)),
+                    ),
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(value=str(user_id)),
+                    ),
+                    FieldCondition(
+                        key="patent_number",
+                        match=MatchValue(value=canonical_patent),
+                    ),
+                ]
+            ),
+            limit=1,
+        )
 
-    if records:
-        logger.info(f"Patent {canonical_patent} already embedded in Qdrant for this project. Skipping.")
-        print(f"{canonical_patent} already embedded in project {project_id}")
-        return
+        if records:
+            logger.info(f"Patent {canonical_patent} already embedded in Qdrant for this project. Skipping.")
+            return True
 
     points: List[PointStruct] = []
 
@@ -294,7 +307,9 @@ async def embed_patent(
     if points:
         logger.info(f"Pushing {len(points)} generated vectors to Qdrant cluster...")
         _CLIENT.upsert(collection_name=_COLLECTION_NAME, points=points)
-        logger.info(f"Successfully finished embedding and upserting patent {canonical_patent}")
+    
+    logger.info(f"Successfully finished embedding and upserting patent {canonical_patent}")
+    return False
 
 async def search_element_in_prior_art(
     element_text: str,

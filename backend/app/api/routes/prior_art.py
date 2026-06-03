@@ -1,5 +1,8 @@
 import traceback
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 from app.services.get_structured_abstract import get_abstract
 from app.services.get_structured_description import process_structured_description
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
@@ -19,8 +22,7 @@ from app.models.user import User
 from app.services.priort_art_extractor import fetch_patent_data
 from app.services.get_structured_claims import convert_claims
 from app.tasks.embed_pipeline import background_batch_embed
-from app.services.redis_service import get_all_embed_statuses
-
+from app.services.redis_service import get_all_embed_statuses, set_embed_status
 router = APIRouter()
 
 from pydantic import BaseModel
@@ -49,14 +51,22 @@ async def queue_prior_art_numbers(
     print("numbers => ",numbers)
       
     added_numbers = []
+    duplicate_numbers = []
     # Store reference patent placeholders in DB
     for num in numbers:
         # Check if already added
         res_pat = await db.execute(
             select(Patent).where(Patent.project_id == project_id, Patent.patent_number == num)
         )
-        if res_pat.scalars().first():
-            continue
+        existing_patent = res_pat.scalars().first()
+        if existing_patent:
+            if existing_patent.fetch_status == "failed":
+                # Automatically retry failed patents instead of calling them duplicates
+                added_numbers.append(num)
+                continue
+            else:
+                duplicate_numbers.append(num)
+                continue
         
         patent = Patent(
             project_id=project_id,
@@ -77,8 +87,13 @@ async def queue_prior_art_numbers(
             str(current_user.id), 
             added_numbers
         )
+    elif duplicate_numbers:
+        if len(numbers) == 1:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Patent {numbers[0]} is already present in this project.")
+        else:
+            return {"status": "duplicate", "message": "All provided patents are already present.", "duplicates_skipped": len(duplicate_numbers)}
 
-    return {"status": "queued", "count": len(numbers)}
+    return {"status": "queued", "count": len(added_numbers), "duplicates_skipped": len(duplicate_numbers)}
 
 @router.get("/{project_id}/embed-status", status_code=status.HTTP_200_OK)
 async def get_project_embed_statuses(
@@ -209,18 +224,29 @@ async def embed_single_patent(
         
 
         # Call the embedding service
-        print("# Call the embedding service")
+        logger.info(f"Step 3: Calling embedding service for {patent_number}")
+        await set_embed_status(str(project_id), patent_number, "embedding")
         canonical_patent = normalize_patent_number(
             patent_data.get("patent_number") or patent_number
         )
-        await embed_patent(
+        
+        force_reembed = False
+        if patent.fetch_status != "success":
+            force_reembed = True
+            
+        is_skipped = await embed_patent(
             patent_number=canonical_patent,
             abstract_data=structured_abstract,
             claims_data=structured_claims,
             description_data=structured_description,
             project_id=str(project_id),
-            user_id=str(current_user.id)
+            user_id=str(current_user.id),
+            force_reembed=force_reembed
         )
+        
+        if is_skipped:
+            await set_embed_status(str(project_id), patent_number, "done")
+            return {"status": "already_present", "message": f"Patent {patent_number} is already fully embedded."}
 
         # Update patent info in database
         patent.title = patent_data.get("title")
@@ -242,14 +268,14 @@ async def embed_single_patent(
         db.add(patent)
         await db.commit()
 
+        await set_embed_status(str(project_id), patent_number, "done")
         return {"status": "success", "message": f"Patent {patent_number} successfully embedded."}
     except Exception as e:
         patent.fetch_status = "failed"
         db.add(patent)
         await db.commit()
-        print("\n========== EMBED ERROR ==========")
-        traceback.print_exc()
-        print("=================================\n")    
+        await set_embed_status(str(project_id), patent_number, "failed")
+        logger.error(f"========== EMBED ERROR ==========\nFailed to manually embed {patent_number}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @router.get("/{project_id}", response_model=List[PatentResponse])

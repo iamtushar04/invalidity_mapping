@@ -50,7 +50,7 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
 
                 # 1b. Fetch LLM enriched data (needed for Postgres DB)
                 enriched_data = await patent_fetch_service.fetch_patent(patent_number)
-            print(raw_data, "RAW DATA")
+            logger.info("Successfully fetched raw data for patent %s", patent_number)
             # Parse data out of the raw fetch results for Qdrant
             s_abstract = get_abstract(raw_data)
             s_claims = convert_claims(raw_data)
@@ -80,6 +80,10 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
             # 2. Embedding Phase
             logger.info("Step 2: Saving to Qdrant embedding database...")
             await set_embed_status(project_id, patent_number, "embedding")
+            # Since this background job only runs for new or retried patents, 
+            # we should ALWAYS wipe any partial Qdrant data before starting.
+            force_reembed = True
+
             async with EMBED_SEMAPHORE:
                 await embed_patent(
                     patent_number=canonical_patent,
@@ -87,7 +91,8 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                     claims_data=s_claims,
                     description_data=s_desc,
                     project_id=project_id,
-                    user_id=user_id
+                    user_id=user_id,
+                    force_reembed=force_reembed
                 )
 
             # 3. Done

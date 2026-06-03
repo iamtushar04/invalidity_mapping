@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 import logging
 import asyncio
 from uuid import UUID
@@ -219,60 +219,97 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                 patent_number, guard_err,
                             )
                         
-                    # Compare each element
-                    weighted_score = 0.0
-                    for el in elements:
-                        # Check existing mapping
-                        res_map = await db.execute(
-                            select(Mapping).where(
-                                Mapping.claim_id == claim_id,
-                                Mapping.element_id == el.id,
-                                Mapping.reference_patent_id == ref_id
-                            )
+                    # Cache Check: Do we already have all mappings for this patent and claim?
+                    res_maps_check = await db.execute(
+                        select(Mapping).where(
+                            Mapping.claim_id == claim_id,
+                            Mapping.reference_patent_id == ref_id
                         )
-                        mapping = res_map.scalars().first()
+                    )
+                    existing_mappings = res_maps_check.scalars().all()
+                    
+                    if existing_mappings and len(existing_mappings) == len(elements):
+                        logger.info(f"Step 2: Found {len(existing_mappings)} existing mappings for reference patent {patent_number}. Skipping LLM.")
                         
-                        search_text = f"{el.text}\nContext/Interpretation: {el.comment}" if getattr(el, "comment", None) else el.text
-                        comparison = await mapping_engine_service.compare_element_to_patent(
-                            search_text,
-                            el.element_id,
-                            patent_abstract,
-                            patent_number,
-                            str(project_id),
-                            user_id,
-                        )
-                        
-                        if not mapping:
-                            mapping = Mapping(
-                                project_id=project_id,
-                                claim_id=claim_id,
-                                element_id=el.id,
-                                reference_patent_id=ref_id,
-                                classification=comparison["classification"],
-                                cited_passage=comparison["cited_passage"],
-                                rationale=comparison["rationale"],
-                                para_ref=comparison["para_ref"],
-                                fig_ref=comparison["fig_ref"]
+                        weighted_score = 0.0
+                        for el in elements:
+                            mapping = next((m for m in existing_mappings if m.element_id == el.id), None)
+                            if mapping:
+                                impact = 0.0
+                                cls = mapping.analyst_classification or mapping.classification
+                                if cls == "Y": impact = 1.0
+                                elif cls == "Obviousness": impact = 0.75
+                                elif cls in ("Partial", "P"): impact = 0.50
+                                weighted_score += float(el.weight) * impact
+                                
+                    else:
+                        # Cleanup any weird duplicates or partial sets before asking OpenAI
+                        if existing_mappings:
+                            logger.info(f"Step 2: Cleaning up {len(existing_mappings)} incomplete mappings to prevent duplicates.")
+                            await db.execute(
+                                delete(Mapping).where(
+                                    Mapping.claim_id == claim_id,
+                                    Mapping.reference_patent_id == ref_id
+                                )
                             )
-                            db.add(mapping)
-                        else:
-                            mapping.classification = comparison["classification"]
-                            mapping.cited_passage = comparison["cited_passage"]
-                            mapping.rationale = comparison["rationale"]
-                            mapping.para_ref = comparison["para_ref"]
-                            mapping.fig_ref = comparison["fig_ref"]
-                            db.add(mapping)
-                        await db.commit()
-                        logger.info("Mapping saved for claim %s and element %s", claim_id, el.id)
-                        # Add score impact (Y=100%, Partial=50%, Obviousness=75%, N=0%)
-                        impact = 0.0
-                        cls = mapping.analyst_classification or mapping.classification
-                        if cls == "Y": impact = 1.0
-                        elif cls == "Obviousness": impact = 0.75
-                        elif cls in ("Partial", "P"): impact = 0.50
-                        
-                        logger.info(f"Score Calculation: Element {el.id} classified as '{cls}'. Impact factor: {impact}. Weight: {el.weight}.")
-                        weighted_score += float(el.weight) * impact
+                            await db.commit()
+                            
+                        # Compare each element with LLM
+                        weighted_score = 0.0
+                        for el in elements:
+                            search_text = f"{el.text}\nContext/Interpretation: {el.comment}" if getattr(el, "comment", None) else el.text
+                            comparison = await mapping_engine_service.compare_element_to_patent(
+                                search_text,
+                                el.element_id,
+                                patent_abstract,
+                                patent_number,
+                                str(project_id),
+                                user_id,
+                            )
+                            
+                            # RACE CONDITION FAILSAFE: 
+                            # Check if another background job inserted this exact mapping while we were waiting for OpenAI
+                            res_map_final = await db.execute(
+                                select(Mapping).where(
+                                    Mapping.claim_id == claim_id,
+                                    Mapping.element_id == el.id,
+                                    Mapping.reference_patent_id == ref_id
+                                )
+                            )
+                            existing_mapping = res_map_final.scalars().first()
+                            
+                            if existing_mapping:
+                                existing_mapping.classification = comparison["classification"]
+                                existing_mapping.cited_passage = comparison["cited_passage"]
+                                existing_mapping.rationale = comparison["rationale"]
+                                existing_mapping.para_ref = comparison["para_ref"]
+                                existing_mapping.fig_ref = comparison["fig_ref"]
+                                mapping = existing_mapping
+                            else:
+                                mapping = Mapping(
+                                    project_id=project_id,
+                                    claim_id=claim_id,
+                                    element_id=el.id,
+                                    reference_patent_id=ref_id,
+                                    classification=comparison["classification"],
+                                    cited_passage=comparison["cited_passage"],
+                                    rationale=comparison["rationale"],
+                                    para_ref=comparison["para_ref"],
+                                    fig_ref=comparison["fig_ref"]
+                                )
+                                db.add(mapping)
+                            await db.commit()
+                            logger.info("Mapping saved for claim %s and element %s", claim_id, el.id)
+                            
+                            # Add score impact (Y=100%, Partial=50%, Obviousness=75%, N=0%)
+                            impact = 0.0
+                            cls = mapping.analyst_classification or mapping.classification
+                            if cls == "Y": impact = 1.0
+                            elif cls == "Obviousness": impact = 0.75
+                            elif cls in ("Partial", "P"): impact = 0.50
+                            
+                            logger.info(f"Score Calculation: Element {el.id} classified as '{cls}'. Impact factor: {impact}. Weight: {el.weight}.")
+                            weighted_score += float(el.weight) * impact
                         
                     # Normalize the score to be out of 100%
                     total_weight = sum(float(el.weight) for el in elements)

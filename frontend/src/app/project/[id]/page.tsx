@@ -407,9 +407,22 @@ export default function ProjectAnalysisPage() {
         },
         body: JSON.stringify({ patent_numbers: priorArtInput })
       });
-      if (!res.ok) throw new Error("Failed to queue prior art numbers.");
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || "Failed to queue prior art numbers.");
+      }
+      
+      const data = await res.json();
+      if (data.status === "duplicate") {
+        throw new Error(data.message || "Patents are already present.");
+      }
+      
       setPriorArtInput("");
-      setUploadMsg("Prior art numbers queued! Refresh list in 3 seconds.");
+      if (data.duplicates_skipped > 0) {
+        setUploadMsg(`${data.count} queued. ${data.duplicates_skipped} duplicates skipped.`);
+      } else {
+        setUploadMsg("Prior art numbers queued! Refresh list in 3 seconds.");
+      }
       setTimeout(fetchPriorArt, 3000);
     } catch (err: any) {
       setError(err.message);
@@ -523,7 +536,11 @@ export default function ProjectAnalysisPage() {
 
   const fetchMatrixData = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/analysis/${projectId}/matrix`, {
+      const url = activeClaimId 
+        ? `${BACKEND_URL}/analysis/${projectId}/matrix?claim_id=${activeClaimId}`
+        : `${BACKEND_URL}/analysis/${projectId}/matrix`;
+        
+      const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {

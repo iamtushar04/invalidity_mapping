@@ -46,6 +46,6 @@ async def get_current_user(
         except Exception:
             raise credentials_exception
         
-    current_user_id.set(str(user.id))
+    current_user_id.set(str(user.email))
     logger.debug("User token authenticated successfully.")
     return user

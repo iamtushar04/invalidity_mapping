@@ -25,7 +25,7 @@ async def set_embed_status(project_id: str, patent_number: str, status: str):
             ttl = 7200
 
         await redis_client.setex(key, ttl, status)
-        logger.debug(f"Set redis {key} = {status} (TTL: {ttl}s)")
+        logger.info(f"Set redis {key} = {status} (TTL: {ttl}s)")
     except Exception as e:
         logger.error(f"Failed to set redis status for {key}: {e}")
 

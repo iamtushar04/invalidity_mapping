@@ -11,7 +11,10 @@ db_logger = logging.getLogger("database.operations")
 engine = create_async_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
-    echo=False
+    echo=False,
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=60.0
 )
 
 @event.listens_for(engine.sync_engine, "before_cursor_execute")
