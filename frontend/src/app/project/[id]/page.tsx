@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   FileText, CheckSquare, Layers, Database, Play,
   Table as TableIcon, FileDown, ArrowLeft, Plus,
@@ -23,6 +23,7 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL as string;
 export default function ProjectAnalysisPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   console.log("params", params)
   const projectId = params.id as string;
 
@@ -30,10 +31,24 @@ export default function ProjectAnalysisPage() {
   const [token, setToken] = useState<string | null>(null);
   const [project, setProject] = useState<any>(null);
 
-  // Loading & UI Step
-  const [step, setStep] = useState<number>(0);
+  // Loading & UI Step — synced with URL (?step=N) and localStorage
+  const getInitialStep = () => {
+    const urlStep = searchParams.get("step");
+    if (urlStep !== null) return parseInt(urlStep, 10);
+    const saved = localStorage.getItem(`project-step-${params.id}`);
+    if (saved !== null) return parseInt(saved, 10);
+    return 0;
+  };
+  const [step, setStepState] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Wrapper to sync step → URL + localStorage
+  const setStep = (newStep: number) => {
+    setStepState(newStep);
+    router.replace(`/project/${params.id}?step=${newStep}`);
+    localStorage.setItem(`project-step-${params.id}`, String(newStep));
+  };
 
   // Subject Patent Ingestion (Phase 1)
   const [patentNum, setPatentNum] = useState<string>("");
@@ -43,11 +58,16 @@ export default function ProjectAnalysisPage() {
   const [selectedClaims, setSelectedClaims] = useState<string[]>([]); // UUID list
 
   // Claim Elements Breakdown (Phase 3)
-  const [activeClaimId, setActiveClaimId] = useState<string | null>(null);
+  const [activeClaimId, setActiveClaimIdState] = useState<string | null>(null);
   const [elements, setElements] = useState<any[]>([]);
   // Mapping claimId → weight (average weight of its elements) for badge display
   const [claimWeightMap, setClaimWeightMap] = useState<Record<string, number>>({});
   const { runSplit, loading: splitLoading, error: splitError } = useClaimSplit();
+
+  const setActiveClaimId = (id: string | null) => {
+    setActiveClaimIdState(id);
+    if (id) localStorage.setItem(`project-claimId-${params.id}`, id);
+  };
 
   // Prior Art Input (Phase 4)
   const [priorArtInput, setPriorArtInput] = useState<string>("");
@@ -58,7 +78,12 @@ export default function ProjectAnalysisPage() {
   // Background Job Mapping Status (Phase 5)
   const [analysisStatus, setAnalysisStatus] = useState<any>(null);
   const [matrixData, setMatrixData] = useState<any>(null);
-  const [matrixFilter, setMatrixFilter] = useState<string>("all");
+  const [matrixFilter, setMatrixFilterState] = useState<string>("all");
+
+  const setMatrixFilter = (f: string) => {
+    setMatrixFilterState(f);
+    localStorage.setItem(`project-matrixFilter-${params.id}`, f);
+  };
 
   // Claim Chart & Export (Phase 6)
   const [selectedMatrixPatents, setSelectedMatrixPatents] = useState<any[]>([]);
@@ -70,6 +95,120 @@ export default function ProjectAnalysisPage() {
   const [chartData, setChartData] = useState<any>(null);
   const [chartRows, setChartRows] = useState<any[]>([]);
   const [isEditingChart, setIsEditingChart] = useState<boolean>(false);
+
+  // Restore step, claimId, and matrixFilter from URL/localStorage on mount
+  useEffect(() => {
+    const initialStep = getInitialStep();
+    setStepState(initialStep);
+
+    const savedClaimId = localStorage.getItem(`project-claimId-${params.id}`);
+    if (savedClaimId) setActiveClaimIdState(savedClaimId);
+
+    const savedFilter = localStorage.getItem(`project-matrixFilter-${params.id}`);
+    if (savedFilter) setMatrixFilterState(savedFilter);
+
+    // Restore elements and weights
+    const savedElements = localStorage.getItem(`project-elements-${params.id}`);
+    if (savedElements) setElements(JSON.parse(savedElements));
+
+    const savedWeightMap = localStorage.getItem(`project-weightMap-${params.id}`);
+    if (savedWeightMap) setClaimWeightMap(JSON.parse(savedWeightMap));
+
+    // Restore Step 6 Chart Data
+    const savedMultiChart = localStorage.getItem(`project-multiChart-${params.id}`);
+    const savedCarouselIndex = localStorage.getItem(`project-carouselIndex-${params.id}`);
+    const savedSelectedMatrix = localStorage.getItem(`project-selectedMatrix-${params.id}`);
+    
+    if (savedMultiChart) {
+      try {
+        const parsedMultiChart = JSON.parse(savedMultiChart);
+        setMultiChartData(parsedMultiChart);
+        
+        let cIndex = 0;
+        if (savedCarouselIndex) {
+            cIndex = parseInt(savedCarouselIndex, 10);
+            setCarouselIndex(cIndex);
+            setCarouselInputValue((cIndex + 1).toString());
+        }
+        
+        if (parsedMultiChart.length > cIndex) {
+            setSelectedRefPatent(parsedMultiChart[cIndex].refPatent);
+            setChartData(parsedMultiChart[cIndex].chartData);
+            setChartRows(parsedMultiChart[cIndex].chartRows);
+        }
+      } catch (e) {
+        console.error("Failed to parse saved chart data", e);
+      }
+    }
+    
+    if (savedSelectedMatrix) {
+        try {
+            setSelectedMatrixPatents(JSON.parse(savedSelectedMatrix));
+        } catch (e) { console.error(e); }
+    }
+  }, [params.id]);
+
+  // Persist elements and weight map when they change
+  useEffect(() => {
+    if (elements.length > 0) {
+      localStorage.setItem(`project-elements-${params.id}`, JSON.stringify(elements));
+    }
+  }, [elements, params.id]);
+
+  useEffect(() => {
+    if (Object.keys(claimWeightMap).length > 0) {
+      localStorage.setItem(`project-weightMap-${params.id}`, JSON.stringify(claimWeightMap));
+    }
+  }, [claimWeightMap, params.id]);
+
+  // Persist chart data when it changes
+  useEffect(() => {
+    if (multiChartData.length > 0) {
+      localStorage.setItem(`project-multiChart-${params.id}`, JSON.stringify(multiChartData));
+    }
+  }, [multiChartData, params.id]);
+
+  useEffect(() => {
+    if (selectedMatrixPatents.length > 0) {
+      localStorage.setItem(`project-selectedMatrix-${params.id}`, JSON.stringify(selectedMatrixPatents));
+    }
+  }, [selectedMatrixPatents, params.id]);
+
+  useEffect(() => {
+    localStorage.setItem(`project-carouselIndex-${params.id}`, String(carouselIndex));
+  }, [carouselIndex, params.id]);
+
+  // Auto-fetch data based on restored step
+  useEffect(() => {
+    if (!token || !projectId) return;
+    
+    // If we landed on Step 4 (Prior Art) and don't have it loaded
+    if (step >= 4 && priorArtList.length === 0) {
+      fetchPriorArt(token);
+    }
+
+    // If we landed on Step 5 (Matrix) and don't have it loaded
+    if (step === 5 && !matrixData && activeClaimId) {
+      autoFetchMatrix(token, activeClaimId);
+    }
+  }, [step, token, projectId, activeClaimId]);
+
+  const autoFetchMatrix = async (authToken: string, claimId: string) => {
+    try {
+      setLoading(true);
+      const res = await fetch(`${BACKEND_URL}/analysis/${projectId}/matrix?claim_id=${claimId}`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMatrixData(data);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Initialize and check credentials
   useEffect(() => {
@@ -101,7 +240,12 @@ export default function ProjectAnalysisPage() {
       // Auto-fetch ingested subject patent if present
       if (data.subject_patent_id) {
         await fetchSubjectPatent(data.subject_patent_id, authToken, data);
-        setStep(1); // Jump to details
+        // Only jump to step 1 if no step is already persisted (first visit)
+        const savedStep = localStorage.getItem(`project-step-${projectId}`);
+        const urlStep = searchParams.get("step");
+        if (!savedStep && !urlStep) {
+          setStep(1);
+        }
       }
     } catch (err: any) {
       setError(err.message);
@@ -363,10 +507,10 @@ export default function ProjectAnalysisPage() {
   };
 
   // Phase 4: Prior Art Input
-  const fetchPriorArt = async () => {
+  const fetchPriorArt = async (authToken: string = token!) => {
     try {
       const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${authToken}` }
       });
       if (res.ok) {
         const data = await res.json();
