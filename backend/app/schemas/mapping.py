@@ -30,6 +30,8 @@ class ScoreResponse(BaseModel):
 
 class MappingMatrixCell(BaseModel):
     element_id: str # e.g. 1A, 1B
+    element_text: Optional[str] = None
+    cited_passage: Optional[str] = None
     classification: str
     analyst_classification: Optional[str] = None
 

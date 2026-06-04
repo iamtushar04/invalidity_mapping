@@ -20,7 +20,12 @@ def _location_from_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
     if ptype == "abstract":
         return "Abstract", ""
     if ptype in ("claim", "claim_element"):
-        return f"Claim {payload.get('claim_number', '')}".strip(), ""
+        claim_num = payload.get('claim_number', '')
+        loc = f"Claim {claim_num}".strip()
+        element_id = payload.get('element_id')
+        if element_id:
+            loc += f" (Element ID: {element_id})"
+        return loc, ""
     return "", ""
 
 
@@ -32,17 +37,16 @@ def _citation_from_payload(payload: Dict[str, Any], max_len: int = 500) -> str:
 
 
 class MappingEngineService:
-    async def compare_element_to_patent(
+    async def fast_compare_element_to_patent(
         self,
         element_text: str,
         element_id: str,
-        patent_abstract: str,
         patent_number: str,
         project_id: str,
         user_id: str,
     ) -> Dict[str, Any]:
+        """Fast vector-based scoring that skips the LLM and instantly returns Y/P/N."""
         prior_art = normalize_patent_number(patent_number) or patent_number.strip()
-
         results = await search_element_in_prior_art(
             element_text,
             [patent_number, prior_art],
@@ -78,6 +82,89 @@ class MappingEngineService:
                 meta_parts.append(f"Fig:{figs}" if figs else "Fig:True")
             meta_str = " | ".join(meta_parts)
             snippets.append(f"[{meta_str} score={score:.2f}]: {payload.get('text', '')}")
+
+        if not valid_payloads or not best_payload:
+            return {
+                "classification": "N",
+                "cited_passage": "Analysis deferred. Select this patent and click 'Create Chart' to run AI.",
+                "para_ref": "",
+                "fig_ref": "",
+                "rationale": "",
+                "saved_snippets": [],
+                "best_payload": {}
+            }
+
+        if max_score > 0.8:
+            classification = "Y"
+        elif max_score > 0.6:
+            classification = "P"
+        else:
+            classification = "N"
+
+        cited_passage = _citation_from_payload(best_payload)
+        para_ref, fig_ref = _location_from_payload(best_payload)
+
+        return {
+            "classification": classification,
+            "cited_passage": f"[Score: {max_score:.2f}] {cited_passage}\n\nAnalysis deferred. Select this patent and click 'Create Chart' to run AI for complete rationale.",
+            "para_ref": para_ref,
+            "fig_ref": fig_ref,
+            "rationale": "",
+            "saved_snippets": snippets,
+            "best_payload": best_payload
+        }
+
+    async def compare_element_to_patent(
+        self,
+        element_text: str,
+        element_id: str,
+        patent_abstract: str,
+        patent_number: str,
+        project_id: str,
+        user_id: str,
+        saved_snippets: Optional[List[str]] = None,
+        best_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        prior_art = normalize_patent_number(patent_number) or patent_number.strip()
+
+        valid_payloads: List[Dict[str, Any]] = []
+        snippets: List[str] = saved_snippets or []
+        max_score = 0.0
+        
+        # Only query Qdrant if snippets weren't provided
+        if not snippets or not best_payload:
+            results = await search_element_in_prior_art(
+                element_text,
+                [patent_number, prior_art],
+                project_id=project_id,
+                user_id=user_id,
+                top_k=5,
+            )
+
+            for res in results:
+                score = getattr(res, "score", 0.0) or 0.0
+                payload = res.payload or {}
+                if not patent_numbers_match(payload.get("patent_number", ""), patent_number, prior_art):
+                    continue
+                valid_payloads.append(payload)
+                if score > max_score:
+                    max_score = score
+                    best_payload = payload
+
+                meta_parts = [f"patent={payload.get('patent_number', '')}"]
+                if payload.get("type"):
+                    meta_parts.append(str(payload["type"]))
+                if payload.get("claim_number"):
+                    meta_parts.append(f"Claim:{payload['claim_number']}")
+                if payload.get("paragraph_number"):
+                    meta_parts.append(f"Para:{payload['paragraph_number']}")
+                if payload.get("has_figure"):
+                    figs = ",".join(payload.get("figure_refs") or [])
+                    meta_parts.append(f"Fig:{figs}" if figs else "Fig:True")
+                meta_str = " | ".join(meta_parts)
+                snippets.append(f"[{meta_str} score={score:.2f}]: {payload.get('text', '')}")
+        else:
+            valid_payloads = [best_payload] # Satisfy the check below
 
         if not valid_payloads or not best_payload:
             return {

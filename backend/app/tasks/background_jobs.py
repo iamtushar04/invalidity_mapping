@@ -234,7 +234,9 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                     )
                     existing_mappings = res_maps_check.scalars().all()
                     
-                    if existing_mappings and len(existing_mappings) == len(elements):
+                    has_pending = any(m.classification == "Pending" for m in existing_mappings)
+                    
+                    if existing_mappings and len(existing_mappings) == len(elements) and not has_pending:
                         logger.info(f"Step 2: Found {len(existing_mappings)} existing mappings for reference patent {patent_number}. Skipping LLM.")
                         
                         weighted_score = 0.0
@@ -260,21 +262,31 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                             )
                             await db.commit()
                             
-                        # Compare each element with LLM
+                        # Create fast similarity-based mappings for the Matrix UI
                         weighted_score = 0.0
                         for el in elements:
+                            # Use fast Qdrant vector similarity to estimate Y/P/N instantly
                             search_text = f"{el.text}\nContext/Interpretation: {el.comment}" if getattr(el, "comment", None) else el.text
-                            comparison = await mapping_engine_service.compare_element_to_patent(
+                            fast_comparison = await mapping_engine_service.fast_compare_element_to_patent(
                                 search_text,
                                 el.element_id,
-                                patent_abstract,
                                 patent_number,
                                 str(project_id),
                                 user_id,
                             )
                             
+                            classification = fast_comparison["classification"]
+                            cited_passage_data = {
+                                "display_text": fast_comparison["cited_passage"],
+                                "saved_snippets": fast_comparison.get("saved_snippets", []),
+                                "best_payload": fast_comparison.get("best_payload", {})
+                            }
+                            rationale = fast_comparison["rationale"]
+                            para_ref = fast_comparison["para_ref"]
+                            fig_ref = fast_comparison["fig_ref"]
+                            
                             # RACE CONDITION FAILSAFE: 
-                            # Check if another background job inserted this exact mapping while we were waiting for OpenAI
+                            # Check if another background job inserted this exact mapping
                             res_map_final = await db.execute(
                                 select(Mapping).where(
                                     Mapping.claim_id == claim_id,
@@ -285,11 +297,13 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                             existing_mapping = res_map_final.scalars().first()
                             
                             if existing_mapping:
-                                existing_mapping.classification = comparison["classification"]
-                                existing_mapping.cited_passage = comparison["cited_passage"]
-                                existing_mapping.rationale = comparison["rationale"]
-                                existing_mapping.para_ref = comparison["para_ref"]
-                                existing_mapping.fig_ref = comparison["fig_ref"]
+                                # Only overwrite if it was completely blank/Pending, don't destroy actual LLM data
+                                if existing_mapping.classification in (None, "Pending", "N"):
+                                    existing_mapping.classification = classification
+                                    existing_mapping.cited_passage = cited_passage_data
+                                    existing_mapping.rationale = rationale
+                                    existing_mapping.para_ref = para_ref
+                                    existing_mapping.fig_ref = fig_ref
                                 mapping = existing_mapping
                             else:
                                 mapping = Mapping(
@@ -297,24 +311,22 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                     claim_id=claim_id,
                                     element_id=el.id,
                                     reference_patent_id=ref_id,
-                                    classification=comparison["classification"],
-                                    cited_passage=comparison["cited_passage"],
-                                    rationale=comparison["rationale"],
-                                    para_ref=comparison["para_ref"],
-                                    fig_ref=comparison["fig_ref"]
+                                    classification=classification,
+                                    cited_passage=cited_passage_data,
+                                    rationale=rationale,
+                                    para_ref=para_ref,
+                                    fig_ref=fig_ref
                                 )
                                 db.add(mapping)
                             await db.commit()
-                            logger.info("Mapping saved for claim %s and element %s", claim_id, el.id)
+                            logger.info("Deferred mapping saved for claim %s and element %s", claim_id, el.id)
                             
-                            # Add score impact (Y=100%, Partial=50%, Obviousness=75%, N=0%)
+                            # Add score impact
                             impact = 0.0
-                            cls = mapping.analyst_classification or mapping.classification
-                            if cls == "Y": impact = 1.0
-                            elif cls == "Obviousness": impact = 0.75
-                            elif cls in ("Partial", "P"): impact = 0.50
+                            if classification == "Y": impact = 1.0
+                            elif classification in ("Partial", "P"): impact = 0.50
                             
-                            logger.info(f"Score Calculation: Element {el.id} classified as '{cls}'. Impact factor: {impact}. Weight: {el.weight}.")
+                            logger.info(f"Score Calculation: Element {el.id} classified as '{classification}'. Impact factor: {impact}. Weight: {el.weight}.")
                             weighted_score += float(el.weight) * impact
                         
                     # Normalize the score to be out of 100%

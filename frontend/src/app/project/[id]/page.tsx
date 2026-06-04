@@ -6,7 +6,7 @@ import {
   FileText, CheckSquare, Layers, Database, Play,
   Table as TableIcon, FileDown, ArrowLeft, Plus,
   Trash2, Loader2, Sparkles, AlertCircle, Check,
-  Edit3, ShieldAlert, LogOut
+  Edit3, ShieldAlert, LogOut, LayoutDashboard, ChevronLeft, ChevronRight
 } from "lucide-react";
 
 import useClaimSplit from "@/hooks/useClaimSplit";
@@ -14,6 +14,9 @@ import WeightInput from "@/components/WeightInput";
 import { computePriorityFromWeight, validateWeightSum } from "@/utils/priority";
 import { getCellColor } from "@/utils";
 import { FilteredMatrix } from "@/constant";
+import Tooltip from "@/components/Tooltip";
+import FilterSidebar from "@/components/matrix/FilterSidebar";
+import MatrixTable from "@/components/matrix/MatrixTable";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL as string;
 
@@ -58,6 +61,11 @@ export default function ProjectAnalysisPage() {
   const [matrixFilter, setMatrixFilter] = useState<string>("all");
 
   // Claim Chart & Export (Phase 6)
+  const [selectedMatrixPatents, setSelectedMatrixPatents] = useState<any[]>([]);
+  const [multiChartData, setMultiChartData] = useState<any[]>([]);
+  const [carouselIndex, setCarouselIndex] = useState<number>(0);
+  const [carouselInputValue, setCarouselInputValue] = useState<string>("1");
+
   const [selectedRefPatent, setSelectedRefPatent] = useState<any>(null);
   const [chartData, setChartData] = useState<any>(null);
   const [chartRows, setChartRows] = useState<any[]>([]);
@@ -566,24 +574,74 @@ export default function ProjectAnalysisPage() {
   };
 
   // Phase 6: Chart Generation & Persistence
-  const handleLoadClaimChart = async (refPatent: any) => {
-    setSelectedRefPatent(refPatent);
+  const handleToggleMatrixPatent = (row: any) => {
+    setSelectedMatrixPatents(prev => {
+      const exists = prev.find(p => p.reference_patent_id === row.reference_patent_id);
+      if (exists) return prev.filter(p => p.reference_patent_id !== row.reference_patent_id);
+      return [...prev, row];
+    });
+  };
+
+  const handleCreateMultipleCharts = async () => {
+    if (selectedMatrixPatents.length === 0) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/${refPatent.reference_patent_id}/generate`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) throw new Error("Failed to generate or fetch claim chart.");
-      const data = await res.json();
-      setChartData(data);
-      setChartRows(data.chart_rows || []);
-      setStep(6); // Show Claim Chart
+      const generatedCharts = [];
+      for (const refPatent of selectedMatrixPatents) {
+        const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/${refPatent.reference_patent_id}/generate?force=true`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error(`Failed to generate or fetch claim chart for ${refPatent.patent_number}.`);
+        const data = await res.json();
+        generatedCharts.push({
+          refPatent,
+          chartData: data,
+          chartRows: data.chart_rows || []
+        });
+      }
+      setMultiChartData(generatedCharts);
+      setCarouselIndex(0);
+      if (generatedCharts.length > 0) {
+        setSelectedRefPatent(generatedCharts[0].refPatent);
+        setChartData(generatedCharts[0].chartData);
+        setChartRows(generatedCharts[0].chartRows);
+      }
+      setStep(6); // Show Claim Chart Carousel
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCarouselChange = (direction: "prev" | "next") => {
+    let newIndex = carouselIndex;
+    if (direction === "prev" && carouselIndex > 0) newIndex--;
+    if (direction === "next" && carouselIndex < multiChartData.length - 1) newIndex++;
+    
+    setCarouselIndex(newIndex);
+    setCarouselInputValue((newIndex + 1).toString());
+    setSelectedRefPatent(multiChartData[newIndex].refPatent);
+    setChartData(multiChartData[newIndex].chartData);
+    setChartRows(multiChartData[newIndex].chartRows);
+    setIsEditingChart(false);
+  };
+
+  const handleCarouselInputSubmit = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      const val = parseInt(carouselInputValue);
+      if (!isNaN(val) && val >= 1 && val <= multiChartData.length) {
+        const newIndex = val - 1;
+        setCarouselIndex(newIndex);
+        setSelectedRefPatent(multiChartData[newIndex].refPatent);
+        setChartData(multiChartData[newIndex].chartData);
+        setChartRows(multiChartData[newIndex].chartRows);
+        setIsEditingChart(false);
+      } else {
+        setCarouselInputValue((carouselIndex + 1).toString());
+      }
     }
   };
 
@@ -669,6 +727,13 @@ export default function ProjectAnalysisPage() {
         </div>
 
         <div className="flex items-center gap-6">
+          <button
+            onClick={() => router.push("/")}
+            className="p-2 rounded-xl text-slate-400 hover:text-indigo-400 hover:bg-indigo-400/10 transition-colors flex items-center gap-2"
+            title="Projects Dashboard"
+          >
+            <LayoutDashboard className="w-5 h-5" />
+          </button>
           <div className="hidden lg:flex items-center gap-2 text-xs font-semibold text-slate-400">
             {[
               { stepNum: 0, label: "Ingest" },
@@ -1105,77 +1170,20 @@ export default function ProjectAnalysisPage() {
             )}
 
             {matrixData && (
-              <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-                <div className="space-y-4">
-                  <h3 className="font-bold text-xs uppercase tracking-widest font-mono text-slate-400">Filter Matrix</h3>
+              <div className="flex w-full overflow-hidden">
+                <FilterSidebar 
+                  FilteredMatrix={FilteredMatrix} 
+                  matrixFilter={matrixFilter} 
+                  setMatrixFilter={setMatrixFilter} 
+                />
 
-                  {FilteredMatrix?.map((f) => (
-                    <div
-                      key={f?.filterId}
-                      onClick={() => setMatrixFilter(f?.filterId)}
-                      className={`p-3 rounded-xl border cursor-pointer transition-all text-xs font-semibold ${matrixFilter === f?.filterId
-                        ? "bg-indigo-600/10 border-indigo-500 text-indigo-300"
-                        : "bg-slate-900/40 border-slate-800 hover:border-slate-700 text-slate-400"
-                        }`}
-                    >
-                      {f?.label}
-                    </div>
-                  ))}
-                </div>
-
-                <div className="lg:col-span-3 bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className="border-b border-slate-800 bg-slate-900/60 font-mono text-xs uppercase text-slate-400">
-                          <th className="p-4">Prior Art Patent</th>
-                          <th className="p-4 text-center">Score</th>
-                          {matrixData?.rows[0]?.mappings?.map((m: any) => (
-                            <th key={m?.element_id} className="p-4 text-center w-16">{m?.element_id}</th>
-                          ))}
-                          <th className="p-4 text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800/60 text-sm">
-                        {filteredRows()?.map((row: any) => (
-                          <tr key={row.reference_patent_id} className="hover:bg-slate-900/20">
-                            <td className="p-4">
-                              <span className="font-mono font-bold text-slate-300">{row.patent_number}</span>
-                              <div className="text-xxs text-slate-500 font-semibold truncate max-w-xs">{row.title}</div>
-                            </td>
-                            <td className="p-4 text-center">
-                              <span className={`px-2 py-0.5 rounded font-mono font-bold ${row.score >= 80
-                                ? "bg-emerald-500/10 text-emerald-400"
-                                : row.score >= 50
-                                  ? "bg-amber-500/10 text-amber-400"
-                                  : "bg-rose-500/10 text-rose-400"
-                                }`}>
-                                {row.score.toFixed(1)}
-                              </span>
-                            </td>
-
-                            {row?.mappings?.map((cell: any) => (
-                              <td key={cell?.element_id} className="p-4 text-center">
-                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center mx-auto text-xxs font-bold border ${getCellColor(cell.analyst_classification || cell.classification)}`}>
-                                  {cell.analyst_classification || cell.classification}
-                                </span>
-                              </td>
-                            ))}
-
-                            <td className="p-4 text-right">
-                              <button
-                                onClick={() => handleLoadClaimChart(row)}
-                                className="bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 ml-auto"
-                              >
-                                <TableIcon className="w-3 h-3" /> Chart
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                <MatrixTable 
+                  matrixData={matrixData}
+                  filteredRows={filteredRows()}
+                  selectedMatrixPatents={selectedMatrixPatents}
+                  handleToggleMatrixPatent={handleToggleMatrixPatent}
+                  handleCreateMultipleCharts={handleCreateMultipleCharts}
+                />
               </div>
             )}
           </div>
@@ -1197,53 +1205,87 @@ export default function ProjectAnalysisPage() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                {isEditingChart ? (
-                  <React.Fragment>
-                    <button
-                      onClick={handleSaveChartEdits}
-                      className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2.5 rounded-xl font-semibold text-xs transition flex items-center gap-1"
-                    >
-                      <Check className="w-4 h-4" /> Save Persisted Edits
-                    </button>
-                    <button
-                      onClick={() => {
-                        setChartRows(chartData.chart_rows || []);
-                        setIsEditingChart(false);
-                      }}
-                      className="bg-slate-800 hover:bg-slate-700 px-4 py-2.5 rounded-xl text-xs"
-                    >
-                      Cancel
-                    </button>
-                  </React.Fragment>
-                ) : (
-                  <React.Fragment>
-                    <button
-                      onClick={() => setIsEditingChart(true)}
-                      className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2.5 rounded-xl font-semibold text-xs transition flex items-center gap-1"
-                    >
-                      <Edit3 className="w-4 h-4" /> Customize Rationale
-                    </button>
+              <div className="flex flex-col items-end gap-2">
+                <div className="flex items-center gap-2">
+                  {isEditingChart ? (
+                    <React.Fragment>
+                      <button
+                        onClick={handleSaveChartEdits}
+                        className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2.5 rounded-xl font-semibold text-xs transition flex items-center gap-1"
+                      >
+                        <Check className="w-4 h-4" /> Save Persisted Edits
+                      </button>
+                      <button
+                        onClick={() => {
+                          setChartRows(chartData.chart_rows || []);
+                          setIsEditingChart(false);
+                        }}
+                        className="bg-slate-800 hover:bg-slate-700 px-4 py-2.5 rounded-xl text-xs"
+                      >
+                        Cancel
+                      </button>
+                    </React.Fragment>
+                  ) : (
+                    <React.Fragment>
+                      <button
+                        onClick={() => setIsEditingChart(true)}
+                        className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2.5 rounded-xl font-semibold text-xs transition flex items-center gap-1"
+                      >
+                        <Edit3 className="w-4 h-4" /> Customize Rationale
+                      </button>
 
-                    <button
-                      onClick={() => handleDownloadReport('docx')}
-                      className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                      <button
+                        onClick={() => handleDownloadReport('docx')}
+                        className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                      >
+                        Word (.docx)
+                      </button>
+                      <button
+                        onClick={() => handleDownloadReport('xlsx')}
+                        className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                      >
+                        Excel (.xlsx)
+                      </button>
+                      <button
+                        onClick={() => handleDownloadReport('pdf')}
+                        className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                      >
+                        PDF (.pdf)
+                      </button>
+                    </React.Fragment>
+                  )}
+                </div>
+                
+                {multiChartData.length > 1 && !isEditingChart && (
+                  <div className="flex items-center gap-1 bg-slate-900/60 px-2 py-1 rounded-lg border border-slate-800 shadow-sm mt-1">
+                    <button 
+                      onClick={() => handleCarouselChange("prev")}
+                      disabled={carouselIndex === 0}
+                      className="p-1 text-slate-400 disabled:text-slate-700 hover:text-white hover:bg-slate-800 rounded transition"
                     >
-                      Word (.docx)
+                      <ChevronLeft className="w-4 h-4" />
                     </button>
-                    <button
-                      onClick={() => handleDownloadReport('xlsx')}
-                      className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
+                    
+                    <div className="flex items-center gap-1 font-mono text-xs text-indigo-400 mx-1">
+                      <input 
+                        type="text" 
+                        value={carouselInputValue}
+                        onChange={(e) => setCarouselInputValue(e.target.value)}
+                        onKeyDown={handleCarouselInputSubmit}
+                        className="w-6 text-center bg-transparent border-b border-slate-600 hover:border-indigo-500 focus:border-indigo-400 focus:outline-none text-indigo-300 transition-colors"
+                      />
+                      <span className="text-slate-500">/</span>
+                      <span className="text-slate-500">{multiChartData.length}</span>
+                    </div>
+
+                    <button 
+                      onClick={() => handleCarouselChange("next")}
+                      disabled={carouselIndex === multiChartData.length - 1}
+                      className="p-1 text-slate-400 disabled:text-slate-700 hover:text-white hover:bg-slate-800 rounded transition"
                     >
-                      Excel (.xlsx)
+                      <ChevronRight className="w-4 h-4" />
                     </button>
-                    <button
-                      onClick={() => handleDownloadReport('pdf')}
-                      className="bg-slate-800 hover:bg-slate-700 px-3 py-2.5 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1"
-                    >
-                      PDF (.pdf)
-                    </button>
-                  </React.Fragment>
+                  </div>
                 )}
               </div>
             </div>

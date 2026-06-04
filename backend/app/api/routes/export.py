@@ -63,6 +63,12 @@ async def generate_or_fetch_claim_chart(
             detail="Obviousness mappings must be run before chart compilation."
         )
         
+    # Get reference patent
+    res_pat = await db.execute(select(Patent).where(Patent.id == reference_patent_id))
+    ref_pat = res_pat.scalars().first()
+    if not ref_pat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reference patent not found.")
+        
     # Compile rows
     chart_rows = []
     claim_id = None
@@ -81,10 +87,48 @@ async def generate_or_fetch_claim_chart(
         if el and getattr(el, "comment", None):
             claim_text = f"{claim_text}\n\n[User Note: {el.comment}]"
 
+        # ON-DEMAND LLM GENERATION: If rationale is missing (because we used fast similarity), trigger LLM now
+        if not m.rationale or m.rationale.startswith("Rationale generation failed") or "Analysis deferred" in m.rationale or force:
+            from app.services.mapping_engine import mapping_engine_service
+            
+            saved_snippets = None
+            best_payload = None
+            if isinstance(m.cited_passage, dict):
+                saved_snippets = m.cited_passage.get("saved_snippets")
+                best_payload = m.cited_passage.get("best_payload")
+
+            comparison = await mapping_engine_service.compare_element_to_patent(
+                claim_text,
+                el.element_id if el else "",
+                ref_pat.abstract or "",
+                ref_pat.patent_number,
+                str(project_id),
+                str(current_user.id),
+                saved_snippets=saved_snippets,
+                best_payload=best_payload
+            )
+            import logging
+            logging.info(f"COMPARISON GENERATED: {comparison}")
+            
+            m.classification = comparison["classification"]
+            m.cited_passage = comparison["cited_passage"]
+            m.rationale = comparison["rationale"]
+            m.para_ref = comparison["para_ref"]
+            m.fig_ref = comparison["fig_ref"]
+            db.add(m)
+
+        # Clean up any bleeding placeholders
+        if m.analyst_override and "Analysis deferred" in m.analyst_override:
+            m.analyst_override = None
+
+        display_cited_passage = m.cited_passage
+        if isinstance(display_cited_passage, dict):
+            display_cited_passage = display_cited_passage.get("display_text", "")
+
         chart_rows.append({
             "element_id": el.element_id if el else "1A",
             "claim_text": claim_text,
-            "cited_passage": m.analyst_override or m.cited_passage or "",
+            "cited_passage": m.analyst_override or display_cited_passage or "",
             "para_ref": m.para_ref or "",
             "fig_ref": m.fig_ref or "",
             "rationale": m.rationale or ""
