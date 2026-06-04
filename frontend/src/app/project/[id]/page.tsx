@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 
 import useClaimSplit from "@/hooks/useClaimSplit";
+import { useAutoAnalysis } from "@/hooks/useAutoAnalysis";
+import { sortMatrixRows } from "@/utils/matrixSort";
 import WeightInput from "@/components/WeightInput";
 import { computePriorityFromWeight, validateWeightSum } from "@/utils/priority";
 import { getCellColor } from "@/utils";
@@ -73,7 +75,17 @@ export default function ProjectAnalysisPage() {
   const [priorArtInput, setPriorArtInput] = useState<string>("");
   const [priorArtList, setPriorArtList] = useState<any[]>([]);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
-  const [embedStatuses, setEmbedStatuses] = useState<Record<string, string>>({});
+
+  // useAutoAnalysis hook: handles embed-status polling + auto-trigger of analysis
+  // armAutoAnalysis() is called after user adds patents to arm the auto-trigger
+  const { embedStatuses, armAutoAnalysis } = useAutoAnalysis({
+    step,
+    projectId,
+    token,
+    priorArtList,
+    handleRunAnalysisAll: () => handleRunAnalysisAll(),
+    setUploadMsg,
+  });
 
   // Background Job Mapping Status (Phase 5)
   const [analysisStatus, setAnalysisStatus] = useState<any>(null);
@@ -521,31 +533,7 @@ export default function ProjectAnalysisPage() {
     }
   };
 
-  // Poll embed status
-  useEffect(() => {
-    let interval: any;
-    if (step === 4 && projectId && token) {
-      const fetchEmbedStatus = async () => {
-        try {
-          const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}/embed-status`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            setEmbedStatuses(data.statuses || {});
-          }
-        } catch (err) {
-          console.error("Failed to fetch embed status:", err);
-        }
-      };
 
-      fetchEmbedStatus();
-      interval = setInterval(fetchEmbedStatus, 3000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [step, projectId, token]);
 
   const handleAddManualPriorArt = async () => {
     if (!priorArtInput.trim()) return;
@@ -571,10 +559,11 @@ export default function ProjectAnalysisPage() {
       
       setPriorArtInput("");
       if (data.duplicates_skipped > 0) {
-        setUploadMsg(`${data.count} queued. ${data.duplicates_skipped} duplicates skipped.`);
+        setUploadMsg(`${data.count} queued. ${data.duplicates_skipped} duplicates skipped. ⚡ Auto-analysis will trigger when embedding completes...`);
       } else {
-        setUploadMsg("Prior art numbers queued! Refresh list in 3 seconds.");
+        setUploadMsg("Prior art numbers queued! ⚡ Auto-analysis will trigger when embedding completes...");
       }
+      armAutoAnalysis(); // arm the auto-trigger
       setTimeout(fetchPriorArt, 3000);
     } catch (err: any) {
       setError(err.message);
@@ -607,10 +596,11 @@ export default function ProjectAnalysisPage() {
       }
       
       if (data.duplicates_skipped > 0) {
-        setUploadMsg(`${data.count} queued. ${data.duplicates_skipped} duplicates skipped.`);
+        setUploadMsg(`${data.count} queued. ${data.duplicates_skipped} duplicates skipped. ⚡ Auto-analysis will trigger when embedding completes...`);
       } else {
-        setUploadMsg("Spreadsheet parsed and queued! Refresh list in 3 seconds.");
+        setUploadMsg("Spreadsheet parsed and queued! ⚡ Auto-analysis will trigger when embedding completes...");
       }
+      armAutoAnalysis(); // arm the auto-trigger
       setTimeout(fetchPriorArt, 3000);
     } catch (err: any) {
       setError(err.message);
@@ -837,7 +827,7 @@ export default function ProjectAnalysisPage() {
   const filteredRows = () => {
     if (!matrixData || !matrixData.rows) return [];
 
-    return matrixData.rows.filter((row: any) => {
+    const filtered = matrixData.rows.filter((row: any) => {
       if (matrixFilter === "all") return true;
       if (matrixFilter === "strong") return row.score >= 80;
       if (matrixFilter === "good") return row.score >= 50 && row.score < 80;
@@ -851,6 +841,8 @@ export default function ProjectAnalysisPage() {
       }
       return true;
     });
+
+    return sortMatrixRows(filtered);
   };
 
 
@@ -1017,7 +1009,7 @@ export default function ProjectAnalysisPage() {
             </div>
 
             <div className="bg-slate-950/40 border border-slate-800 rounded-2xl p-6 space-y-4">
-              {patentData.claims?.map((claim: any) => (
+              {[...(patentData.claims || [])].sort((a: any, b: any) => parseInt(a.claim_number) - parseInt(b.claim_number)).map((claim: any) => (
                 <div
                   key={claim.id}
                   onClick={() => toggleClaimSelection(claim.id)}

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Dict, Any
 from uuid import UUID
+import re
 import io
 
 from app.database import get_db
@@ -46,8 +47,8 @@ async def queue_prior_art_numbers(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         
-    # Split manual list by comma
-    numbers = [n.strip() for n in req.patent_numbers.split(",") if n.strip()]
+    # Split manual list by any combination of commas, spaces, tabs, or newlines
+    numbers = [n.strip() for n in re.split(r'[,\s]+', req.patent_numbers) if n.strip()]
     print("numbers => ",numbers)
       
     added_numbers = []

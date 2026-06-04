@@ -20,6 +20,33 @@ export default function MatrixTable({
 }: MatrixTableProps) {
   const [isColumnsCollapsed, setIsColumnsCollapsed] = useState(false);
 
+  // Helper to extract unique, mathematically-sorted column headers
+  const getUniqueSortedColumns = () => {
+    if (!matrixData?.rows?.length) return [];
+    
+    // Extract mappings from the first row as the source of truth for columns
+    const firstRowMappings = matrixData.rows[0].mappings || [];
+    
+    // Deduplicate by element_id
+    const uniqueMap = new Map();
+    firstRowMappings.forEach((m: any) => {
+      if (m?.element_id && !uniqueMap.has(m.element_id)) {
+        uniqueMap.set(m.element_id, m);
+      }
+    });
+
+    const uniqueCols = Array.from(uniqueMap.values());
+
+    // Sort mathematically (e.g., 1, 2, 10, 11) using localeCompare with numeric=true
+    return uniqueCols.sort((a, b) => {
+      const idA = String(a.element_id || "");
+      const idB = String(b.element_id || "");
+      return idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' });
+    });
+  };
+
+  const columns = getUniqueSortedColumns();
+
   return (
     <div className="bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden flex flex-col relative w-full">
       <div className="p-3 bg-slate-900/60 border-b border-slate-800 flex justify-between items-center">
@@ -57,10 +84,10 @@ export default function MatrixTable({
                 </>
               )}
 
-              {matrixData?.rows[0]?.mappings?.map((m: any) => (
-                <th key={m?.element_id} className="p-4 text-center w-16">
-                  <Tooltip content={m?.element_text || "No text available"} width="w-64" position="bottom">
-                    <span className="cursor-help border-b border-dashed border-slate-600 hover:text-white transition-colors">{m?.element_id}</span>
+              {columns.map((m: any) => (
+                <th key={m.element_id} className="p-4 text-center w-16">
+                  <Tooltip content={m.element_text || "No text available"} width="w-64" position="bottom">
+                    <span className="cursor-help border-b border-dashed border-slate-600 hover:text-white transition-colors">{m.element_id}</span>
                   </Tooltip>
                 </th>
               ))}
@@ -97,14 +124,16 @@ export default function MatrixTable({
                   </>
                 )}
 
-                {row?.mappings?.map((cell: any) => {
-                  const classification = cell.analyst_classification || cell.classification;
+                {columns.map((col: any) => {
+                  // Safely find the matching cell for this column, ignoring duplicates
+                  const cell = row?.mappings?.find((m: any) => m.element_id === col.element_id);
+                  const classification = cell?.analyst_classification || cell?.classification || "N";
                   const fallbackText = classification === "N" 
                     ? "No relevant passage found." 
                     : "Passage retrieved but pending persistence. Generate chart to view.";
                   
                   return (
-                    <td key={cell?.element_id} className="p-4 text-center">
+                    <td key={col.element_id} className="p-4 text-center">
                       <Tooltip content={cell?.cited_passage || fallbackText} width="w-72" position="bottom">
                         <span className={`w-8 h-8 rounded-lg flex items-center justify-center mx-auto text-xxs font-bold border transition hover:scale-105 z-10 ${getCellColor(classification)}`}>
                           {classification}

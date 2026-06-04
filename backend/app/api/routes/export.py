@@ -5,6 +5,7 @@ from sqlalchemy import select, update
 from typing import List
 from uuid import UUID
 from datetime import datetime
+import re
 
 from app.database import get_db
 from app.models.project import Project
@@ -72,12 +73,21 @@ async def generate_or_fetch_claim_chart(
     # Compile rows
     chart_rows = []
     claim_id = None
+    seen_elements = set()
+    
     for m in mappings:
         claim_id = m.claim_id
         
         # Query element
         res_el = await db.execute(select(ClaimElement).where(ClaimElement.id == m.element_id))
         el = res_el.scalars().first()
+        
+        element_str_id = el.element_id if el else "1A"
+        
+        # Deduplicate
+        if element_str_id in seen_elements:
+            continue
+        seen_elements.add(element_str_id)
         
         # Query claim details
         res_cl = await db.execute(select(Claim).where(Claim.id == m.claim_id))
@@ -111,7 +121,23 @@ async def generate_or_fetch_claim_chart(
             logging.info(f"COMPARISON GENERATED: {comparison}")
             
             m.classification = comparison["classification"]
-            m.cited_passage = comparison["cited_passage"]
+            
+            # CRITICAL: Preserve the dict structure (with saved_snippets) so future
+            # chart regenerations can skip Qdrant. Only update the display_text.
+            if isinstance(m.cited_passage, dict):
+                # Update display_text in-place, keep saved_snippets + best_payload intact
+                m.cited_passage = {
+                    **m.cited_passage,
+                    "display_text": comparison["cited_passage"]
+                }
+            else:
+                # First time — store as full dict
+                m.cited_passage = {
+                    "display_text": comparison["cited_passage"],
+                    "saved_snippets": comparison.get("saved_snippets", []),
+                    "best_payload": comparison.get("best_payload", {})
+                }
+            
             m.rationale = comparison["rationale"]
             m.para_ref = comparison["para_ref"]
             m.fig_ref = comparison["fig_ref"]
@@ -126,7 +152,7 @@ async def generate_or_fetch_claim_chart(
             display_cited_passage = display_cited_passage.get("display_text", "")
 
         chart_rows.append({
-            "element_id": el.element_id if el else "1A",
+            "element_id": element_str_id,
             "claim_text": claim_text,
             "cited_passage": m.analyst_override or display_cited_passage or "",
             "para_ref": m.para_ref or "",
@@ -134,8 +160,11 @@ async def generate_or_fetch_claim_chart(
             "rationale": m.rationale or ""
         })
         
-    # Sort chronologically
-    chart_rows.sort(key=lambda c: c["element_id"])
+    # Sort chronologically (Natural Sort)
+    def natural_keys(text):
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+        
+    chart_rows.sort(key=lambda c: natural_keys(c["element_id"]))
     
     # Store chart record
     chart = ClaimChart(
