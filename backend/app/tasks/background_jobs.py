@@ -1,5 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import select, update, delete
+from sqlalchemy.exc import OperationalError, DBAPIError
+from app.utils.db_retry import commit_with_retry
 import logging
 import asyncio
 from uuid import UUID
@@ -19,7 +21,11 @@ from app.embedding.text_utils import normalize_patent_number
 logger = logging.getLogger(__name__)
 
 # Dedicated engine for background threads to avoid session collision
-bg_engine = create_async_engine(settings.DATABASE_URL)
+bg_engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,      # Tests connection before using it — prevents stale connection errors
+    pool_recycle=300,        # Refresh idle connections every 5 minutes
+)
 bg_session_maker = async_sessionmaker(bind=bg_engine, class_=AsyncSession, expire_on_commit=False)
 from app.core.logger import current_project_id, current_user_id
 
@@ -70,7 +76,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                 if not res_job.scalars().first():
                     job = AnalysisJob(project_id=project_id, reference_patent_id=ref.id, status="pending")
                     db.add(job)
-            await db.commit()
+            await commit_with_retry(db)
             
             # Process sequentially
             for ref in references:
@@ -85,7 +91,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                     .where(AnalysisJob.project_id == project_id, AnalysisJob.reference_patent_id == ref_id)
                     .values(status="running")
                 )
-                await db.commit()
+                await commit_with_retry(db)
                 
                 try:
                     # Fetch patent metadata if still pending
@@ -260,7 +266,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                     Mapping.reference_patent_id == ref_id
                                 )
                             )
-                            await db.commit()
+                            await commit_with_retry(db)
                             
                         # Create fast similarity-based mappings for the Matrix UI
                         weighted_score = 0.0
@@ -318,7 +324,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                     fig_ref=fig_ref
                                 )
                                 db.add(mapping)
-                            await db.commit()
+                            await commit_with_retry(db)
                             logger.info("Deferred mapping saved for claim %s and element %s", claim_id, el.id)
                             
                             # Add score impact
@@ -358,7 +364,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                         .where(AnalysisJob.project_id == project_id, AnalysisJob.reference_patent_id == ref_id)
                         .values(status="completed")
                     )
-                    await db.commit()
+                    await commit_with_retry(db)
                     
                 except Exception as ex:
                     logger.error(f"Failed to process patent obviousness comparison: {ex}")
@@ -368,7 +374,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                         .where(AnalysisJob.project_id == project_id, AnalysisJob.reference_patent_id == ref_id)
                         .values(status="failed", error_message=str(ex))
                     )
-                    await db.commit()
+                    await commit_with_retry(db)
                     
                 # Small throttle to simulate real async execution
                 await asyncio.sleep(0.5)

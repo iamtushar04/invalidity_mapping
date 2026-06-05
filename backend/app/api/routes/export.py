@@ -17,6 +17,7 @@ from app.schemas.export import ClaimChartResponse, SaveChartEditsRequest
 from app.services.export_service import export_service
 from app.api.dependencies import get_current_user
 from app.models.user import User
+from app.utils.db_retry import commit_with_retry
 
 router = APIRouter()
 
@@ -174,7 +175,7 @@ async def generate_or_fetch_claim_chart(
         chart_rows=chart_rows
     )
     db.add(chart)
-    await db.commit()
+    await commit_with_retry(db)  # Retry up to 3x if DB blinks during the save
     await db.refresh(chart)
     return chart
 
