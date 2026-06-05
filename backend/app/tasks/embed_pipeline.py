@@ -151,7 +151,8 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
 
 async def background_batch_embed(project_id: str, user_id: str, patent_numbers: list[str]):
     """
-    Background task to run the pipeline for multiple patents concurrently.
+    Background task to run the pipeline for multiple patents concurrently in chunks of 5.
+    Creates AnalysisJob tracking records and triggers matrix processing dynamically per chunk.
     """
     if not patent_numbers:
         return
@@ -160,28 +161,78 @@ async def background_batch_embed(project_id: str, user_id: str, patent_numbers: 
     for p in patent_numbers:
         await set_embed_status(project_id, p, "pending")
     
-    # Fire off all pipelines concurrently (semaphores will throttle the actual work internally)
-    tasks = [
-        _pipeline_fetch_and_embed(project_id, user_id, p)
-        for p in patent_numbers
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # SAFETY NET: Check if any tasks crashed catastrophically and returned an Exception object
-    for idx, result in enumerate(results):
-        if isinstance(result, Exception):
-            stuck_patent = patent_numbers[idx]
-            logger.error(f"CRITICAL PIPELINE ERROR: Unhandled exception escaped for patent {stuck_patent}. Exception: {result}")
-            
-            # Force status to failed so the UI doesn't spin forever
-            try:
-                await set_embed_status(project_id, stuck_patent, "failed")
-                async with SessionLocal() as db:
-                    await db.execute(
-                        update(Patent)
-                        .where(Patent.project_id == project_id, Patent.patent_number == stuck_patent)
-                        .values(fetch_status="failed")
+    chunk_size = 5
+    for i in range(0, len(patent_numbers), chunk_size):
+        chunk = patent_numbers[i:i + chunk_size]
+        
+        # Fire off pipelines for this chunk concurrently
+        tasks = [
+            _pipeline_fetch_and_embed(project_id, user_id, p)
+            for p in chunk
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # SAFETY NET: Check if any tasks crashed catastrophically
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                stuck_patent = chunk[idx]
+                logger.error(f"CRITICAL PIPELINE ERROR: Unhandled exception escaped for patent {stuck_patent}. Exception: {result}")
+                
+                try:
+                    await set_embed_status(project_id, stuck_patent, "failed")
+                    async with SessionLocal() as db:
+                        await db.execute(
+                            update(Patent)
+                            .where(Patent.project_id == project_id, Patent.patent_number == stuck_patent)
+                            .values(fetch_status="failed")
+                        )
+                        await db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to force failure status for stuck patent {stuck_patent}: {e}")
+
+        # --- AUTO-TRIGGER OBVIOUSNESS ANALYSIS FOR THIS CHUNK ---
+        try:
+            from app.models.project import Project
+            from sqlalchemy import select
+            import uuid
+            from app.tasks.background_jobs import run_obviousness_mapping_task
+            from app.models.analysis_job import AnalysisJob
+
+            async with SessionLocal() as db:
+                res_proj = await db.execute(
+                    select(Project).where(Project.id == uuid.UUID(project_id))
+                )
+                project = res_proj.scalars().first()
+                if project and project.selected_claim_ids:
+                    # Find Patent IDs for this chunk that successfully embedded
+                    res_pats = await db.execute(
+                        select(Patent).where(
+                            Patent.project_id == project_id,
+                            Patent.patent_number.in_(chunk),
+                            Patent.fetch_status == "success"
+                        )
                     )
-                    await db.commit()
-            except Exception as e:
-                logger.error(f"Failed to force failure status for stuck patent {stuck_patent}: {e}")
+                    chunk_patents = res_pats.scalars().all()
+                    
+                    if chunk_patents:
+                        # Queue AnalysisJob tracker records for progress bar visibility
+                        for pat in chunk_patents:
+                            res_job = await db.execute(
+                                select(AnalysisJob).where(
+                                    AnalysisJob.project_id == project_id,
+                                    AnalysisJob.reference_patent_id == pat.id
+                                )
+                            )
+                            if not res_job.scalars().first():
+                                db.add(AnalysisJob(
+                                    project_id=project_id,
+                                    reference_patent_id=pat.id,
+                                    status="pending"
+                                ))
+                        await db.commit()
+                        
+                        logger.info(f"Auto-triggering obviousness analysis for {len(chunk_patents)} chunk patents across {len(project.selected_claim_ids)} claims.")
+                        for claim_id in project.selected_claim_ids:
+                            asyncio.create_task(run_obviousness_mapping_task(project.id, claim_id))
+        except Exception as e:
+            logger.error(f"Failed to auto-trigger obviousness analysis: {e}")

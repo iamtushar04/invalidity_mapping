@@ -1,0 +1,57 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    send_batch_size: 1000
+    timeout: 1s
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100
+    expected_new_traces_per_sec: 10
+    policies:
+      [
+        {
+          name: keep_errors,
+          type: status_code,
+          status_code: {status_codes: [ERROR]}
+        },
+        {
+          name: keep_slow,
+          type: latency,
+          latency: {threshold_ms: 500}
+        },
+        {
+          name: sample_others,
+          type: probabilistic,
+          probabilistic: {sampling_percentage: 10}
+        }
+      ]
+
+connectors:
+  spanmetrics:
+
+exporters:
+  otlp:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, batch]
+      exporters: [spanmetrics, otlp]
+    metrics:
+      receivers: [spanmetrics]
+      exporters: [prometheus]

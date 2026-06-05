@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, DateTime, ForeignKey, JSON, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
@@ -15,5 +15,6 @@ class ClaimChart(Base):
     chart_rows = Column(JSON, nullable=True)
     exported_at = Column(DateTime(timezone=True), nullable=True)
     export_format = Column(String, nullable=True)
+    llm_score = Column(Float, default=0.0)
     
     project = relationship("Project", back_populates="claim_charts")

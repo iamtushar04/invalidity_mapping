@@ -1,0 +1,19 @@
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: invalidity-backend
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: invalidity
+          __path__: /var/log/app/**/*.log
+    pipeline_stages:
+      - regex:
+          expression: '^\[(?P<timestamp>[^\]]+)\] \[(?P<level>[^\]]+)\] \[(?P<module>[^\]]+)\] \[User: (?P<user_id>[^\]]+)\] \[Proj: (?P<project_id>[^\]]+)\] \[Trace: (?P<trace_id>[^\]]+)\] - (?P<message>.*)$'
+      - labels:
+          level:
+          module:
+          user_id:
+          project_id:
+          trace_id:

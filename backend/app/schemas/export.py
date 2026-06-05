@@ -10,6 +10,7 @@ class ChartRowSchema(BaseModel):
     para_ref: Optional[str] = None
     fig_ref: Optional[str] = None
     rationale: str
+    classification: Optional[str] = None
 
 class ClaimChartResponse(BaseModel):
     id: UUID
@@ -19,6 +20,7 @@ class ClaimChartResponse(BaseModel):
     chart_rows: List[ChartRowSchema]
     exported_at: Optional[datetime] = None
     export_format: Optional[str] = None
+    llm_score: Optional[float] = 0.0
     
     class Config:
         from_attributes = True

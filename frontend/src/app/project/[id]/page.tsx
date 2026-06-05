@@ -101,6 +101,7 @@ export default function ProjectAnalysisPage() {
   const [selectedMatrixPatents, setSelectedMatrixPatents] = useState<any[]>([]);
   const [multiChartData, setMultiChartData] = useState<any[]>([]);
   const [carouselIndex, setCarouselIndex] = useState<number>(0);
+  const [chartStatuses, setChartStatuses] = useState<Record<string, string>>({});
   const [carouselInputValue, setCarouselInputValue] = useState<string>("1");
 
   const [selectedRefPatent, setSelectedRefPatent] = useState<any>(null);
@@ -221,6 +222,34 @@ export default function ProjectAnalysisPage() {
       setLoading(false);
     }
   };
+
+  const fetchChartStatuses = async (authToken: string = token!) => {
+    if (!projectId) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/status`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setChartStatuses(data.statuses || {});
+      }
+    } catch (err) {
+      console.error("Failed to fetch chart statuses:", err);
+    }
+  };
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (token && projectId && step >= 5) {
+      fetchChartStatuses(token); // initial fetch
+      interval = setInterval(() => {
+        fetchChartStatuses(token);
+      }, 5000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [step, token, projectId]);
 
   // Initialize and check credentials
   useEffect(() => {
@@ -633,32 +662,10 @@ export default function ProjectAnalysisPage() {
   // Active status polling loop
   // Phase 5: Obviousness Analysis & Matrix - Run analysis for all selected claims
   const handleRunAnalysisAll = async () => {
-    if (!selectedClaims || selectedClaims.length === 0) {
-      setError("No claims selected for analysis.");
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      // Trigger analysis for each selected claim sequentially
-      for (const claimId of selectedClaims) {
-        const res = await fetch(`${BACKEND_URL}/analysis/${projectId}/run?claim_id=${claimId}`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.detail || `Analysis trigger failed for claim ${claimId}`);
-        }
-      }
-      // After triggering all, start polling status
-      setStep(5);
-      pollAnalysisStatus();
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    // The backend now automatically triggers the analysis when embedding completes.
+    // We just transition the UI to step 5 to watch the background progress.
+    setStep(5);
+    pollAnalysisStatus();
   };
   // Active status polling loop
   const pollInterval = useRef<any>(null);
@@ -677,8 +684,10 @@ export default function ProjectAnalysisPage() {
 
           if (data.percent_complete === 100) {
             clearInterval(pollInterval.current);
-            fetchMatrixData();
           }
+          
+          // Continuously fetch Matrix data so chunks stream in live
+          fetchMatrixData();
         }
       } catch (err) {
         console.error(err);
@@ -718,31 +727,65 @@ export default function ProjectAnalysisPage() {
 
   const handleCreateMultipleCharts = async () => {
     if (selectedMatrixPatents.length === 0) return;
-    setLoading(true);
-    setError(null);
     try {
-      const generatedCharts = [];
-      for (const refPatent of selectedMatrixPatents) {
-        const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/${refPatent.reference_patent_id}/generate?force=true`, {
+      const refIds = selectedMatrixPatents.map(p => p.reference_patent_id);
+      const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/generate-async`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ reference_patent_ids: refIds })
+      });
+      if (!res.ok) throw new Error("Failed to queue chart generation.");
+      
+      // Clear selection so the user can select others immediately
+      setSelectedMatrixPatents([]);
+      fetchChartStatuses(token!);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleViewChart = async (refPatentId: string, patentNumber: string) => {
+    setLoading(true);
+    try {
+      // Find all patents that have a "done" chart status
+      const donePatents = matrixData?.rows?.filter((r: any) => chartStatuses[r.reference_patent_id] === "done") || [];
+      
+      // If the clicked one isn't in the done list (failsafe), add it manually
+      if (!donePatents.find((p: any) => p.reference_patent_id === refPatentId)) {
+        donePatents.push({ reference_patent_id: refPatentId, patent_number: patentNumber });
+      }
+
+      // Fetch all done charts in parallel
+      const fetchPromises = donePatents.map(async (p: any) => {
+        const res = await fetch(`${BACKEND_URL}/charts/${projectId}/charts/${p.reference_patent_id}/generate?force=false`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}` }
         });
-        if (!res.ok) throw new Error(`Failed to generate or fetch claim chart for ${refPatent.patent_number}.`);
+        if (!res.ok) throw new Error(`Failed to load claim chart for ${p.patent_number}`);
         const data = await res.json();
-        generatedCharts.push({
-          refPatent,
+        return {
+          refPatent: { reference_patent_id: p.reference_patent_id, patent_number: p.patent_number },
           chartData: data,
           chartRows: data.chart_rows || []
-        });
-      }
+        };
+      });
+
+      const generatedCharts = await Promise.all(fetchPromises);
+      
+      // Find the index of the specific chart the user clicked
+      let targetIndex = generatedCharts.findIndex(c => c.refPatent.reference_patent_id === refPatentId);
+      if (targetIndex === -1) targetIndex = 0;
+
       setMultiChartData(generatedCharts);
-      setCarouselIndex(0);
-      if (generatedCharts.length > 0) {
-        setSelectedRefPatent(generatedCharts[0].refPatent);
-        setChartData(generatedCharts[0].chartData);
-        setChartRows(generatedCharts[0].chartRows);
-      }
-      setStep(6); // Show Claim Chart Carousel
+      setCarouselIndex(targetIndex);
+      setSelectedRefPatent(generatedCharts[targetIndex].refPatent);
+      setChartData(generatedCharts[targetIndex].chartData);
+      setChartRows(generatedCharts[targetIndex].chartRows);
+      setCarouselInputValue((targetIndex + 1).toString());
+      setStep(6);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -812,12 +855,14 @@ export default function ProjectAnalysisPage() {
     }
   };
 
-  const handleDownloadReport = (format: string) => {
-    if (!selectedRefPatent) return;
-    const url = `${BACKEND_URL}/charts/${projectId}/charts/${selectedRefPatent.reference_patent_id}/export?format=${format}&token=${token}`;
+  const handleDownloadReport = (format: string, refId?: string, refNum?: string) => {
+    const targetRefId = refId || selectedRefPatent?.reference_patent_id;
+    const targetRefNum = refNum || selectedRefPatent?.patent_number;
+    if (!targetRefId) return;
+    const url = `${BACKEND_URL}/charts/${projectId}/charts/${targetRefId}/export?format=${format}&token=${token}`;
     const link = document.createElement("a");
     link.href = url;
-    link.download = `Claim_Chart_${patentNum}_vs_${selectedRefPatent.patent_number}.${format}`;
+    link.download = `Claim_Chart_${patentNum}_vs_${targetRefNum}.${format}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1319,6 +1364,9 @@ export default function ProjectAnalysisPage() {
                   selectedMatrixPatents={selectedMatrixPatents}
                   handleToggleMatrixPatent={handleToggleMatrixPatent}
                   handleCreateMultipleCharts={handleCreateMultipleCharts}
+                  chartStatuses={chartStatuses}
+                  handleViewChart={handleViewChart}
+                  handleDownloadReport={handleDownloadReport}
                 />
               </div>
             )}
@@ -1336,8 +1384,25 @@ export default function ProjectAnalysisPage() {
                   <ArrowLeft className="w-4 h-4" />
                 </button>
                 <div>
-                  <h2 className="text-xl font-bold">Claim Chart Summary</h2>
-                  <p className="text-xs text-slate-400 font-mono">Subject: {patentNum} vs Prior Art: {selectedRefPatent.patent_number}</p>
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    Claim Chart Summary
+                    {(() => {
+                      const matrixRow = matrixData?.rows?.find((r: any) => r.reference_patent_id === selectedRefPatent.reference_patent_id);
+                      const vectorScore = matrixRow ? matrixRow.score.toFixed(1) : "0.0";
+                      const llmScore = chartData?.llm_score !== undefined ? chartData.llm_score.toFixed(1) : "0.0";
+                      return (
+                        <div className="flex gap-2 ml-4">
+                          <div className="bg-slate-900 border border-slate-700 px-3 py-1 rounded-full text-xs flex items-center gap-1">
+                            ⚡ <span className="text-slate-400">Vector Score:</span> <span className="text-white font-mono font-bold">{vectorScore}%</span>
+                          </div>
+                          <div className="bg-indigo-900/40 border border-indigo-500/50 px-3 py-1 rounded-full text-xs flex items-center gap-1">
+                            🧠 <span className="text-indigo-300">LLM Score:</span> <span className="text-white font-mono font-bold">{llmScore}%</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </h2>
+                  <p className="text-xs text-slate-400 font-mono mt-1">Subject: {patentNum} vs Prior Art: {selectedRefPatent.patent_number}</p>
                 </div>
               </div>
 

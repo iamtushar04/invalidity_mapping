@@ -3,6 +3,7 @@ import os
 from contextvars import ContextVar
 from pathlib import Path
 from datetime import datetime
+from opentelemetry import trace
 
 # 1. Create the Context Variables (The "invisible bubbles")
 current_user_id: ContextVar[str] = ContextVar("current_user_id", default=None)
@@ -73,6 +74,13 @@ class DynamicRoutingHandler(logging.Handler):
             record.user_id = uid or "SYSTEM"
             record.project_id = pid or "GLOBAL"
             
+            # Inject trace_id
+            span = trace.get_current_span()
+            if span and span.is_recording():
+                record.trace_id = format(span.get_span_context().trace_id, "032x")
+            else:
+                record.trace_id = "0" * 32
+            
             # Get the correct file handler for this combination
             h = self._get_handler(uid, pid)
             
@@ -102,7 +110,7 @@ def setup_logger():
     # Set up our dynamic router
     dynamic_handler = DynamicRoutingHandler()
     formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] [%(name)s] [User: %(user_id)s] [Proj: %(project_id)s] - %(message)s"
+        "[%(asctime)s] [%(levelname)s] [%(name)s] [User: %(user_id)s] [Proj: %(project_id)s] [Trace: %(trace_id)s] - %(message)s"
     )
     dynamic_handler.setFormatter(formatter)
     

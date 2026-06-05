@@ -76,33 +76,22 @@ export function useAutoAnalysis({
           const statuses: Record<string, string> = data.statuses || {};
           setEmbedStatuses(statuses);
 
-          // AUTO-TRIGGER: Only fires when armed AND all patents have settled
+          // AUTO-TRIGGER: Wait until all sequential batches have finished embedding
           if (autoAnalysisPending && allPatentsSettled(statuses, priorArtList)) {
             setAutoAnalysisPending(false); // disarm — ensures it fires only once
-
-            const failedCount = Object.values(statuses).filter(
-              (s) => s === "failed"
-            ).length;
-            const doneCount = Object.values(statuses).filter(
-              (s) => s === "done"
-            ).length;
+            
+            const failedCount = Object.values(statuses).filter(s => s === "failed").length;
+            const doneCount = Object.values(statuses).filter(s => s === "done").length;
 
             if (doneCount > 0) {
-              // At least some patents embedded — run analysis on them
               if (failedCount > 0) {
-                setUploadMsg(
-                  `⚡ ${failedCount} patent(s) failed to embed. Running analysis on ${doneCount} successfully embedded patent(s)...`
-                );
+                setUploadMsg(`⚡ ${failedCount} patent(s) failed. All valid patents are now queued for analysis!`);
               } else {
-                setUploadMsg(`⚡ All patents embedded! Auto-starting analysis...`);
+                setUploadMsg(`⚡ All sequential batches finished embedding! Transitioning to Matrix...`);
               }
-              // Short delay so user can read the message before the UI transitions
               setTimeout(() => handleRunAnalysisAll(), 1500);
             } else {
-              // All patents failed — do NOT trigger analysis
-              setUploadMsg(
-                `⚠️ All patents failed to embed. Please check patent numbers and try again.`
-              );
+              setUploadMsg(`⚠️ All patents failed to embed. Please check patent numbers and try again.`);
             }
           }
         } catch (err) {

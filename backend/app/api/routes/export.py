@@ -18,8 +18,43 @@ from app.services.export_service import export_service
 from app.api.dependencies import get_current_user
 from app.models.user import User
 from app.utils.db_retry import commit_with_retry
+from app.tasks.chart_jobs import background_generate_multiple_charts
+from app.services.redis_service import get_all_chart_statuses
+from fastapi import BackgroundTasks
+from pydantic import BaseModel
 
 router = APIRouter()
+
+class AsyncChartRequest(BaseModel):
+    reference_patent_ids: List[str]
+
+@router.post("/{project_id}/charts/generate-async", status_code=status.HTTP_202_ACCEPTED)
+async def generate_charts_async(
+    project_id: UUID,
+    req: AsyncChartRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    from app.services.redis_service import set_chart_status
+    for ref_id in req.reference_patent_ids:
+        await set_chart_status(str(project_id), ref_id, "pending")
+        
+    background_tasks.add_task(
+        background_generate_multiple_charts,
+        str(project_id),
+        str(current_user.id),
+        req.reference_patent_ids
+    )
+    return {"status": "queued"}
+
+@router.get("/{project_id}/charts/status")
+async def get_chart_statuses(
+    project_id: UUID,
+    current_user: User = Depends(get_current_user)
+):
+    statuses = await get_all_chart_statuses(str(project_id))
+    return {"statuses": statuses}
 
 @router.post("/{project_id}/charts/{reference_patent_id}/generate", response_model=ClaimChartResponse)
 async def generate_or_fetch_claim_chart(

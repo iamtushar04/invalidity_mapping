@@ -55,3 +55,44 @@ async def get_all_embed_statuses(project_id: str, patent_numbers: list[str]) -> 
     except Exception as e:
         logger.error(f"Failed to mget redis statuses for project {project_id}: {e}")
         return {}
+
+async def set_chart_status(project_id: str, ref_id: str, status: str, ttl: int = 86400):
+    """
+    Store the chart generation status in Redis.
+    """
+    key = f"chart:{project_id}:{ref_id}"
+    try:
+        await redis_client.setex(key, ttl, status)
+    except Exception as e:
+        logger.error(f"Failed to set chart status for {key}: {e}")
+
+async def get_chart_status(project_id: str, ref_id: str) -> str:
+    """
+    Get chart generation status for a single patent.
+    """
+    key = f"chart:{project_id}:{ref_id}"
+    try:
+        status = await redis_client.get(key)
+        return status if status else "none"
+    except Exception as e:
+        logger.error(f"Failed to get chart status for {key}: {e}")
+        return "none"
+
+async def get_all_chart_statuses(project_id: str) -> dict[str, str]:
+    """
+    Bulk fetch all chart statuses for a project.
+    """
+    pattern = f"chart:{project_id}:*"
+    try:
+        keys = await redis_client.keys(pattern)
+        if not keys:
+            return {}
+        values = await redis_client.mget(keys)
+        statuses = {}
+        for k, v in zip(keys, values):
+            ref_id = k.split(":")[-1]
+            statuses[ref_id] = v if v else "none"
+        return statuses
+    except Exception as e:
+        logger.error(f"Failed to get all chart statuses for project {project_id}: {e}")
+        return {}

@@ -46,10 +46,10 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
             logger.info("Starting background obviousness mapping task...")
 
             # 1. Fetch reference patents
-            # Only fetch patents that have successfully completed the embedding pipeline!
-            # Ignoring 'failed', 'pending', and 'fetching' patents prevents 409 Conflict crashes.
+            # Only fetch patents that have successfully completed the embedding pipeline
             res_pat = await db.execute(
-                select(Patent).where(
+                select(Patent)
+                .where(
                     Patent.project_id == project_id, 
                     Patent.is_reference == True,
                     Patent.fetch_status == "success"
@@ -62,21 +62,8 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
             elements = res_el.scalars().all()
             
             if not references or not elements:
-                logger.warning("No references or elements found. Terminating obviousness task.")
+                logger.info("No pending references or elements found for claim %s. Terminating obviousness task.", claim_id)
                 return
-                
-            # Initialize job status list to track
-            for ref in references:
-                res_job = await db.execute(
-                    select(AnalysisJob).where(
-                        AnalysisJob.project_id == project_id,
-                        AnalysisJob.reference_patent_id == ref.id
-                    )
-                )
-                if not res_job.scalars().first():
-                    job = AnalysisJob(project_id=project_id, reference_patent_id=ref.id, status="pending")
-                    db.add(job)
-            await commit_with_retry(db)
             
             # Process sequentially
             for ref in references:

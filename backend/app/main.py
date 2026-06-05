@@ -15,6 +15,9 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
+from app.core.telemetry import setup_telemetry
+setup_telemetry(app, engine)
+
 # Set all CORS enabled origins (allow frontend next.js access)
 app.add_middleware(
     CORSMiddleware,

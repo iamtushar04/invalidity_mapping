@@ -211,7 +211,7 @@ async def embed_patent(
     logger.info("Processing abstract embedding...")
     abstract_text = abstract_data.get("abstract", "")
     if not _skip(abstract_text):
-        vec = _embed_text(abstract_text)
+        vec = await asyncio.to_thread(_embed_text, abstract_text)
         payload = {
             "type": "abstract",
             "patent_number": canonical_patent,
@@ -238,7 +238,7 @@ async def embed_patent(
         claim_text = " ".join(claim.get("full_text", []))
         if _skip(claim_text):
             continue
-        vec = _embed_text(claim_text)
+        vec = await asyncio.to_thread(_embed_text, claim_text)
         payload = {
             "type": "claim",
             "patent_number": canonical_patent,
@@ -256,7 +256,7 @@ async def embed_patent(
             el_text = element.get("text", "")
             if _skip(el_text):
                 continue
-            vec_el = _embed_text(el_text)
+            vec_el = await asyncio.to_thread(_embed_text, el_text)
             payload_el = {
                 "type": "claim_element",
                 # ✅ FIX: use canonical_patent (not raw patent_number) so that
@@ -285,7 +285,7 @@ async def embed_patent(
         text = chunk.get("text", "")
         if _skip(text):
             continue
-        vec = _embed_text(text)
+        vec = await asyncio.to_thread(_embed_text, text)
         payload = {
             "type": "description_chunk",
             "patent_number": canonical_patent,
@@ -333,7 +333,7 @@ async def search_element_in_prior_art(
     """
     _ensure_collection()
 
-    vec = _embed_text(element_text)
+    vec = await asyncio.to_thread(_embed_text, element_text)
 
     patent_variants = _patent_number_variants(*patent_numbers)
     if not patent_variants:
@@ -367,7 +367,6 @@ async def search_element_in_prior_art(
             ]
         )
 
-    import asyncio
     raw_results = await asyncio.to_thread(
         _search_vectors,
         vec,           # positional — avoids any to_thread kwarg ambiguity

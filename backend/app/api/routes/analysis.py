@@ -62,11 +62,16 @@ async def get_analysis_status(
         select(AnalysisJob).where(AnalysisJob.project_id == project_id)
     )
     jobs = res_jobs.scalars().all()
-    if not jobs:
+    res_pats = await db.execute(
+        select(Patent).where(Patent.project_id == project_id, Patent.is_reference == True)
+    )
+    total_patents = len(res_pats.scalars().all())
+
+    if total_patents == 0:
         return {"percent_complete": 0, "jobs": []}
 
     completed_jobs = sum(1 for j in jobs if j.status in ["completed", "failed"])
-    percent = int((completed_jobs / len(jobs)) * 100)
+    percent = int((completed_jobs / total_patents) * 100)
 
     # Query patent numbers for response formatting
     job_details = []
@@ -113,9 +118,13 @@ async def get_obviousness_matrix(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    # Fetch all reference patents
+    # Fetch all reference patents except those that permanently failed
     res_pat = await db.execute(
-        select(Patent).where(Patent.project_id == project_id, Patent.is_reference == True)
+        select(Patent).where(
+            Patent.project_id == project_id, 
+            Patent.is_reference == True,
+            Patent.fetch_status != "failed"
+        )
     )
     references = res_pat.scalars().all()
 

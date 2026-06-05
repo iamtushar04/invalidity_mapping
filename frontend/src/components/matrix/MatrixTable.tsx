@@ -9,6 +9,9 @@ interface MatrixTableProps {
   selectedMatrixPatents: any[];
   handleToggleMatrixPatent: (row: any) => void;
   handleCreateMultipleCharts: () => void;
+  chartStatuses?: Record<string, string>;
+  handleViewChart?: (refPatentId: string, patentNumber: string) => void;
+  handleDownloadReport?: (format: string, refId?: string, refNum?: string) => void;
 }
 
 export default function MatrixTable({
@@ -16,7 +19,10 @@ export default function MatrixTable({
   filteredRows,
   selectedMatrixPatents,
   handleToggleMatrixPatent,
-  handleCreateMultipleCharts
+  handleCreateMultipleCharts,
+  chartStatuses = {},
+  handleViewChart,
+  handleDownloadReport
 }: MatrixTableProps) {
   const [isColumnsCollapsed, setIsColumnsCollapsed] = useState(false);
 
@@ -24,19 +30,18 @@ export default function MatrixTable({
   const getUniqueSortedColumns = () => {
     if (!matrixData?.rows?.length) return [];
     
-    // Extract mappings from the first row as the source of truth for columns
-    const firstRowMappings = matrixData.rows[0].mappings || [];
-    
-    // Deduplicate by element_id
+    // Extract mappings from all rows to ensure we get all columns even if the first row is pending/failed
     const uniqueMap = new Map();
-    firstRowMappings.forEach((m: any) => {
-      if (m?.element_id && !uniqueMap.has(m.element_id)) {
-        uniqueMap.set(m.element_id, m);
-      }
+    matrixData.rows.forEach((row: any) => {
+      (row.mappings || []).forEach((m: any) => {
+        if (m?.element_id && !uniqueMap.has(m.element_id)) {
+          uniqueMap.set(m.element_id, m);
+        }
+      });
     });
 
     const uniqueCols = Array.from(uniqueMap.values());
-
+    
     // Sort mathematically (e.g., 1, 2, 10, 11) using localeCompare with numeric=true
     return uniqueCols.sort((a, b) => {
       const idA = String(a.element_id || "");
@@ -73,14 +78,16 @@ export default function MatrixTable({
           <thead>
             <tr className="border-b border-slate-800 bg-slate-900/60 font-mono text-xs uppercase text-slate-400">
               {/* Sticky Checkbox */}
-              <th className="p-2 border-r border-slate-800/50 w-10 text-center text-[10px]">
-                SEL
+              <th className="p-2 border-r border-slate-800/50 w-24 text-center text-[10px]">
+                CHART
               </th>
               
               {!isColumnsCollapsed && (
                 <>
                   <th className="p-4 w-64 bg-slate-900/30">Prior Art Patent</th>
-                  <th className="p-4 text-center w-24 bg-slate-900/30">Score</th>
+                  <th className="p-4 text-center w-24 bg-slate-900/30" title="Mathematical keyword/vector similarity score before LLM review">
+                    Vector Score
+                  </th>
                 </>
               )}
 
@@ -94,15 +101,38 @@ export default function MatrixTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 text-sm">
-            {filteredRows?.map((row: any) => (
+            {filteredRows?.map((row: any) => {
+              const status = chartStatuses[row.reference_patent_id] || "none";
+              return (
               <tr key={row.reference_patent_id} className="hover:bg-slate-900/30 transition-colors">
-                <td className="p-2 border-r border-slate-800/50 text-center w-10">
-                  <input 
-                    type="checkbox"
-                    checked={!!selectedMatrixPatents.find((p: any) => p.reference_patent_id === row.reference_patent_id)}
-                    onChange={() => handleToggleMatrixPatent(row)}
-                    className="w-4 h-4 accent-indigo-500 rounded cursor-pointer mx-auto block"
-                  />
+                <td className="p-2 border-r border-slate-800/50 text-center w-36">
+                  {status === "processing" || status === "pending" ? (
+                    <span className="text-[10px] bg-slate-800 text-indigo-400 px-2 py-1 rounded-full animate-pulse border border-slate-700 whitespace-nowrap">
+                      ⚙️ Generating...
+                    </span>
+                  ) : status === "done" ? (
+                    <div className="flex flex-col items-center gap-1">
+                      <button 
+                        onClick={() => handleViewChart && handleViewChart(row.reference_patent_id, row.patent_number)}
+                        className="text-[10px] w-full bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 px-2 py-1 rounded border border-emerald-500/30 transition whitespace-nowrap"
+                      >
+                        📊 View Chart
+                      </button>
+                      <button 
+                        onClick={() => handleDownloadReport && handleDownloadReport('pdf', row.reference_patent_id, row.patent_number)}
+                        className="text-[10px] w-full bg-slate-800 text-slate-300 hover:bg-slate-700 px-2 py-1 rounded border border-slate-700 transition whitespace-nowrap"
+                      >
+                        📄 Download PDF
+                      </button>
+                    </div>
+                  ) : (
+                    <input 
+                      type="checkbox"
+                      checked={!!selectedMatrixPatents.find((p: any) => p.reference_patent_id === row.reference_patent_id)}
+                      onChange={() => handleToggleMatrixPatent(row)}
+                      className="w-4 h-4 accent-indigo-500 rounded cursor-pointer mx-auto block"
+                    />
+                  )}
                 </td>
 
                 {!isColumnsCollapsed && (
@@ -143,7 +173,8 @@ export default function MatrixTable({
                   );
                 })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
