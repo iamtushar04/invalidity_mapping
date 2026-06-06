@@ -19,7 +19,15 @@ logger = logging.getLogger(__name__)
 def natural_keys(text):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
 
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+@tracer.start_as_current_span("process_single_chart")
 async def process_single_chart(db: AsyncSession, project_id: str, user_id: str, ref_id: str):
+    span = trace.get_current_span()
+    span.set_attribute("project_id", project_id)
+    span.set_attribute("reference_patent_id", ref_id)
     try:
         project_uuid = UUID(project_id)
         ref_uuid = UUID(ref_id)
@@ -83,16 +91,25 @@ async def process_single_chart(db: AsyncSession, project_id: str, user_id: str, 
                     saved_snippets = m.cited_passage.get("saved_snippets")
                     best_payload = m.cited_passage.get("best_payload")
 
-                comparison = await mapping_engine_service.compare_element_to_patent(
-                    claim_text,
-                    el.element_id if el else "",
-                    ref_pat.abstract or "",
-                    ref_pat.patent_number,
-                    project_id,
-                    user_id,
-                    saved_snippets=saved_snippets,
-                    best_payload=best_payload
-                )
+                comparison = None
+                for attempt in range(3):
+                    try:
+                        comparison = await mapping_engine_service.compare_element_to_patent(
+                            claim_text,
+                            el.element_id if el else "",
+                            ref_pat.abstract or "",
+                            ref_pat.patent_number,
+                            project_id,
+                            user_id,
+                            saved_snippets=saved_snippets,
+                            best_payload=best_payload
+                        )
+                        break
+                    except Exception as llm_err:
+                        logger.warning(f"LLM Chart generation failed (attempt {attempt+1}/3) for element {element_str_id}: {llm_err}")
+                        if attempt == 2:
+                            raise
+                        await asyncio.sleep(5)
                 
                 llm_class = comparison["classification"]
                 if isinstance(m.cited_passage, dict):
@@ -159,14 +176,24 @@ async def process_single_chart(db: AsyncSession, project_id: str, user_id: str, 
         logger.error(f"Failed to process chart for {ref_id}: {e}")
         await set_chart_status(project_id, ref_id, "failed")
 
+@tracer.start_as_current_span("background_generate_multiple_charts")
 async def background_generate_multiple_charts(project_id: str, user_id: str, ref_ids: list[str]):
+    span = trace.get_current_span()
+    span.set_attribute("project_id", project_id)
+    span.set_attribute("chart_count", len(ref_ids))
     for ref_id in ref_ids:
         await set_chart_status(project_id, ref_id, "processing")
         
-    for ref_id in ref_ids:
-        try:
-            async with SessionLocal() as db:
-                await process_single_chart(db, project_id, user_id, ref_id)
-        except Exception as e:
-            logger.error(f"Outer task exception for {ref_id}: {e}")
-            await set_chart_status(project_id, ref_id, "failed")
+    sem = asyncio.Semaphore(3)
+    
+    async def _safe_process(r_id: str):
+        async with sem:
+            try:
+                async with SessionLocal() as db:
+                    await process_single_chart(db, project_id, user_id, r_id)
+            except Exception as e:
+                logger.error(f"Outer task exception for {r_id}: {e}")
+                await set_chart_status(project_id, r_id, "failed")
+
+    tasks = [_safe_process(r_id) for r_id in ref_ids]
+    await asyncio.gather(*tasks)

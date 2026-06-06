@@ -96,3 +96,24 @@ async def get_all_chart_statuses(project_id: str) -> dict[str, str]:
     except Exception as e:
         logger.error(f"Failed to get all chart statuses for project {project_id}: {e}")
         return {}
+
+async def set_subject_ingestion_status(project_id: str, status_payload: str, ttl: int = 3600):
+    """
+    Store the subject patent ingestion status payload (JSON string) in Redis.
+    """
+    key = f"subject_ingest:{project_id}"
+    try:
+        await redis_client.setex(key, ttl, status_payload)
+    except Exception as e:
+        logger.error(f"Failed to set subject ingest status for {key}: {e}")
+
+async def get_subject_ingestion_status(project_id: str) -> str | None:
+    """
+    Get the subject patent ingestion status payload (JSON string).
+    """
+    key = f"subject_ingest:{project_id}"
+    try:
+        return await redis_client.get(key)
+    except Exception as e:
+        logger.error(f"Failed to get subject ingest status for {key}: {e}")
+        return None

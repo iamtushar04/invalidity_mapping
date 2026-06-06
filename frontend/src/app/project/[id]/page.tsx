@@ -19,6 +19,7 @@ import { FilteredMatrix } from "@/constant";
 import Tooltip from "@/components/Tooltip";
 import FilterSidebar from "@/components/matrix/FilterSidebar";
 import MatrixTable from "@/components/matrix/MatrixTable";
+import { TypewriterText } from "@/components/ui/TypewriterText";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL as string;
 
@@ -44,6 +45,10 @@ export default function ProjectAnalysisPage() {
   const [step, setStepState] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Streaming state for Step 0 ingestion
+  const [ingestStreamStatus, setIngestStreamStatus] = useState<string | null>(null);
+  const [ingestStreamProgress, setIngestStreamProgress] = useState<number>(0);
 
   // Wrapper to sync step → URL + localStorage
   const setStep = (newStep: number) => {
@@ -319,8 +324,9 @@ export default function ProjectAnalysisPage() {
   const handleIngest = async () => {
     if (!patentNum.trim()) return;
     const cleanedPatentNum = patentNum.replace(/\s+/g, "");
-    setLoading(true);
     setError(null);
+    setIngestStreamStatus("Queued for ingestion...");
+    setIngestStreamProgress(0);
     try {
       const res = await fetch(`${BACKEND_URL}/patents/ingest`, {
         method: "POST",
@@ -334,13 +340,44 @@ export default function ProjectAnalysisPage() {
         const errData = await res.json();
         throw new Error(errData.detail || "Ingestion failed.");
       }
-      const data = await res.json();
-      setPatentData(data);
-      setStep(1); // Go to detail review
+      
+      // Start polling
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}/ingestion-status`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            if (statusData.status === "processing" || statusData.status === "pending") {
+              setIngestStreamStatus(statusData.message || "Processing...");
+              setIngestStreamProgress(statusData.progress || 0);
+            } else if (statusData.status === "success") {
+              clearInterval(pollInterval);
+              setIngestStreamStatus("Success! Fetching final patent data...");
+              setIngestStreamProgress(100);
+              // Fetch the final patent data
+              const finalRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}`, {
+                headers: { Authorization: `Bearer ${token}` }
+              });
+              if (finalRes.ok) {
+                const finalData = await finalRes.json();
+                setPatentData(finalData);
+                setStep(1); // Go to detail review
+              }
+            } else if (statusData.status === "failed") {
+              clearInterval(pollInterval);
+              throw new Error(statusData.message || "Background ingestion failed.");
+            }
+          }
+        } catch (pollErr: any) {
+          clearInterval(pollInterval);
+          setError(pollErr.message);
+        }
+      }, 2000);
+
     } catch (err: any) {
       setError(err.message);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -978,25 +1015,42 @@ export default function ProjectAnalysisPage() {
               </p>
             </div>
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Patent Number</label>
-                <input
-                  type="text"
-                  value={patentNum}
-                  onChange={(e) => setPatentNum(e.target.value)}
-                  placeholder="e.g. US6285999B1 (Google PageRank)"
-                  className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 focus:outline-none focus:border-indigo-500 transition font-mono"
-                />
+            {ingestStreamStatus ? (
+              <div className="space-y-4">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+                  <div className="flex items-center gap-3 mb-4 text-indigo-400 font-mono text-sm">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    {ingestStreamStatus}
+                  </div>
+                  <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                    <div 
+                      className="bg-indigo-500 h-2 rounded-full transition-all duration-500" 
+                      style={{ width: `${ingestStreamProgress}%` }}
+                    />
+                  </div>
+                </div>
               </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Patent Number</label>
+                  <input
+                    type="text"
+                    value={patentNum}
+                    onChange={(e) => setPatentNum(e.target.value)}
+                    placeholder="e.g. US6285999B1 (Google PageRank)"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 focus:outline-none focus:border-indigo-500 transition font-mono"
+                  />
+                </div>
 
-              <button
-                onClick={handleIngest}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-semibold transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
-              >
-                <Sparkles className="w-4 h-4" /> Start Ingestion
-              </button>
-            </div>
+                <button
+                  onClick={handleIngest}
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-semibold transition shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
+                >
+                  <Sparkles className="w-4 h-4" /> Start Ingestion
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -1018,14 +1072,16 @@ export default function ProjectAnalysisPage() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div className="bg-slate-950/40 border border-slate-800 p-6 rounded-2xl backdrop-blur">
                 <h3 className="text-sm font-bold text-indigo-400 uppercase tracking-widest font-mono mb-3">Core Concept</h3>
-                <p className="text-sm text-slate-300 leading-relaxed">{patentData.structured_summary?.core_inventive_concept}</p>
+                <p className="text-sm text-slate-300 leading-relaxed">
+                  <TypewriterText text={patentData.structured_summary?.core_inventive_concept || ""} delay={10} />
+                </p>
               </div>
 
               <div className="bg-slate-950/40 border border-slate-800 p-6 rounded-2xl backdrop-blur">
                 <h3 className="text-sm font-bold text-indigo-400 uppercase tracking-widest font-mono mb-3">Problem-Solution Mapping</h3>
                 <div className="space-y-2 text-sm text-slate-300">
-                  <p><strong className="text-rose-400">Problem:</strong> {patentData.structured_summary?.problem_solution_mapping?.problem}</p>
-                  <p><strong className="text-emerald-400">Solution:</strong> {patentData.structured_summary?.problem_solution_mapping?.solution}</p>
+                  <p><strong className="text-rose-400">Problem:</strong> <TypewriterText text={patentData.structured_summary?.problem_solution_mapping?.problem || ""} delay={15} /></p>
+                  <p><strong className="text-emerald-400">Solution:</strong> <TypewriterText text={patentData.structured_summary?.problem_solution_mapping?.solution || ""} delay={15} /></p>
                 </div>
               </div>
 
@@ -1033,7 +1089,7 @@ export default function ProjectAnalysisPage() {
                 <h3 className="text-sm font-bold text-indigo-400 uppercase tracking-widest font-mono mb-3">Novelty Claims</h3>
                 <ul className="list-disc list-inside text-sm text-slate-300 space-y-1">
                   {patentData.structured_summary?.novelty_points?.map((item: string, idx: number) => (
-                    <li key={idx}>{item}</li>
+                    <li key={idx}><TypewriterText text={item} delay={20} /></li>
                   ))}
                 </ul>
               </div>
@@ -1079,7 +1135,9 @@ export default function ProjectAnalysisPage() {
                       </span>
                     )}
                   </div>
-                  <p className="text-sm mt-2 leading-relaxed">{claim.claim_text}</p>
+                  <p className="text-sm mt-2 leading-relaxed">
+                    <TypewriterText text={claim.claim_text} startOnView={true} delay={5} />
+                  </p>
                 </div>
               ))}
             </div>

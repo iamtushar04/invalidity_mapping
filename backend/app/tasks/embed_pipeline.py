@@ -23,6 +23,9 @@ from sqlalchemy import update
 from app.database import SessionLocal
 from app.models.patent import Patent
 from app.services.priort_art_extractor import fetch_patent_data
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
 
 async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number: str):
     """
@@ -149,11 +152,16 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
             logger.info(f"Retrying patent {patent_number} in {sleep_time:.1f}s (attempt {attempt + 1}/{max_retries})")
             await asyncio.sleep(sleep_time)
 
+@tracer.start_as_current_span("background_batch_embed")
 async def background_batch_embed(project_id: str, user_id: str, patent_numbers: list[str]):
     """
     Background task to run the pipeline for multiple patents concurrently in chunks of 5.
     Creates AnalysisJob tracking records and triggers matrix processing dynamically per chunk.
     """
+    span = trace.get_current_span()
+    span.set_attribute("project_id", project_id)
+    span.set_attribute("patent_count", len(patent_numbers))
+    
     if not patent_numbers:
         return
 

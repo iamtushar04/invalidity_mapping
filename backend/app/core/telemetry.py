@@ -4,6 +4,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.redis import RedisInstrumentor
 import os
 
 def setup_telemetry(app, engine):
@@ -27,3 +29,9 @@ def setup_telemetry(app, engine):
     
     # Auto-instrument SQLAlchemy (every DB query gets traced)
     SQLAlchemyInstrumentor().instrument(engine=engine.sync_engine)
+    
+    # Auto-instrument HTTPX (all outbound requests to OpenAI/Google Patents get traced)
+    HTTPXClientInstrumentor().instrument()
+    
+    # Auto-instrument Redis (Qdrant vectors & caching get traced)
+    RedisInstrumentor().instrument()

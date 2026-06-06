@@ -29,7 +29,15 @@ bg_engine = create_async_engine(
 bg_session_maker = async_sessionmaker(bind=bg_engine, class_=AsyncSession, expire_on_commit=False)
 from app.core.logger import current_project_id, current_user_id
 
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+@tracer.start_as_current_span("run_obviousness_mapping_task")
 async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
+    span = trace.get_current_span()
+    span.set_attribute("project_id", str(project_id))
+    span.set_attribute("claim_id", str(claim_id))
     async with bg_session_maker() as db:
         try:
             res_proj = await db.execute(select(Project).where(Project.id == project_id))
