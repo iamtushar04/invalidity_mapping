@@ -65,6 +65,7 @@ async def process_single_chart(db: AsyncSession, project_id: str, user_id: str, 
         claim_id = None
         seen_elements = set()
         llm_score = 0.0
+        total_weight = 0.0
         
         for m in mappings:
             claim_id = m.claim_id
@@ -148,6 +149,7 @@ async def process_single_chart(db: AsyncSession, project_id: str, user_id: str, 
             elif final_class == "Obviousness": impact = 0.75
             elif final_class in ("Partial", "P"): impact = 0.50
             llm_score += weight * impact
+            total_weight += weight
 
             chart_rows.append({
                 "element_id": element_str_id,
@@ -161,12 +163,14 @@ async def process_single_chart(db: AsyncSession, project_id: str, user_id: str, 
             
         chart_rows.sort(key=lambda c: natural_keys(c["element_id"]))
         
+        final_llm_score = (llm_score / total_weight * 100.0) if total_weight > 0 else 0.0
+        
         new_chart = ClaimChart(
             project_id=project_uuid,
             reference_patent_id=ref_uuid,
             claim_id=claim_id,
             chart_rows=chart_rows,
-            llm_score=llm_score
+            llm_score=final_llm_score
         )
         db.add(new_chart)
         await commit_with_retry(db)

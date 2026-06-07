@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 # Semaphores to limit concurrency
 # We can fetch 5 patents concurrently from APIs
 FETCH_SEMAPHORE = asyncio.Semaphore(5)
-# We can embed 1 patent at a time on the CPU to avoid GIL thrashing and maximize speed
-EMBED_SEMAPHORE = asyncio.Semaphore(1)
+# We can embed up to 3 patents concurrently utilizing the ProcessPoolExecutor
+EMBED_SEMAPHORE = asyncio.Semaphore(3)
 
 from app.core.logger import current_user_id, current_project_id
 from sqlalchemy import update

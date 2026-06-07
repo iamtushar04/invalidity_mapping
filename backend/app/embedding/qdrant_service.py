@@ -10,6 +10,7 @@ import os
 from typing import Any, Dict, List
 import uuid
 import asyncio
+import concurrent.futures
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
@@ -32,6 +33,22 @@ from app.embedding.text_utils import (
 
 print("Getting Data From")
 _MODEL = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu")
+
+def _worker_embed_batch(texts: List[str]) -> List[List[float]]:
+    """Worker function to embed a batch of texts using the globally loaded model."""
+    from app.embedding.text_utils import normalize_text
+    normalized_texts = [normalize_text(t) for t in texts]
+    embeddings = _MODEL.encode(normalized_texts, batch_size=64, normalize_embeddings=True)
+    return [emb.tolist() for emb in embeddings]
+
+PROCESS_POOL = None
+
+def get_process_pool():
+    global PROCESS_POOL
+    if PROCESS_POOL is None:
+        PROCESS_POOL = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+    return PROCESS_POOL
+
 _QDRANT_HOST = getattr(settings, "QDRANT_HOST", "localhost")
 _QDRANT_PORT = getattr(settings, "QDRANT_PORT", 6333)
 _QDRANT_API_KEY = getattr(settings, "QDRANT_API_KEY", "")
@@ -206,12 +223,13 @@ async def embed_patent(
             return True
 
     points: List[PointStruct] = []
+    texts_to_embed: List[str] = []
+    payload_blueprints: List[Dict[str, Any]] = []
 
     # ---- 2️⃣ Abstract ------------------------------------------------------
     logger.info("Processing abstract embedding...")
     abstract_text = abstract_data.get("abstract", "")
     if not _skip(abstract_text):
-        vec = await asyncio.to_thread(_embed_text, abstract_text)
         payload = {
             "type": "abstract",
             "patent_number": canonical_patent,
@@ -222,11 +240,8 @@ async def embed_patent(
             "cpc_codes": [c.get("code") for c in abstract_data.get("metadata", {}).get("classifications", [])],
             "text": abstract_text
         }
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector=vec,
-            payload=payload
-        )   )
+        texts_to_embed.append(abstract_text)
+        payload_blueprints.append(payload)
 
     # ---- 3️⃣ Claims --------------------------------------------------------
     # ``claims_data`` first element is metadata – skip it.
@@ -238,7 +253,6 @@ async def embed_patent(
         claim_text = " ".join(claim.get("full_text", []))
         if _skip(claim_text):
             continue
-        vec = await asyncio.to_thread(_embed_text, claim_text)
         payload = {
             "type": "claim",
             "patent_number": canonical_patent,
@@ -249,14 +263,14 @@ async def embed_patent(
             "is_independent": claim.get("is_independent", False),
             "text": claim_text
         }
-        points.append(PointStruct(id=str(uuid.uuid4()), vector=vec, payload=payload))
+        texts_to_embed.append(claim_text)
+        payload_blueprints.append(payload)
 
         # ---- Elements inside the claim -----------------------------------
         for element in claim.get("elements", []):
             el_text = element.get("text", "")
             if _skip(el_text):
                 continue
-            vec_el = await asyncio.to_thread(_embed_text, el_text)
             payload_el = {
                 "type": "claim_element",
                 # ✅ FIX: use canonical_patent (not raw patent_number) so that
@@ -271,11 +285,8 @@ async def embed_patent(
                 "level": element.get("level"),
                 "text": el_text
             }
-            points.append(PointStruct(
-                id=str(uuid.uuid4()),
-                vector=vec_el,
-                payload=payload_el
-            ))
+            texts_to_embed.append(el_text)
+            payload_blueprints.append(payload_el)
 
     # ---- 4️⃣ Description chunks -------------------------------------------
     logger.info(f"Processing {len(description_data)} description chunks for embedding...")
@@ -285,7 +296,6 @@ async def embed_patent(
         text = chunk.get("text", "")
         if _skip(text):
             continue
-        vec = await asyncio.to_thread(_embed_text, text)
         payload = {
             "type": "description_chunk",
             "patent_number": canonical_patent,
@@ -299,13 +309,21 @@ async def embed_patent(
             "has_images": chunk.get("has_images", False),
             "text": text
         }
-        points.append(
-            PointStruct(
+        texts_to_embed.append(text)
+        payload_blueprints.append(payload)
+
+    # ---- Execute Batch Embedding via ProcessPool ---------------------------
+    if texts_to_embed:
+        logger.info(f"Batch embedding {len(texts_to_embed)} text chunks via Process Pool...")
+        loop = asyncio.get_running_loop()
+        vectors = await loop.run_in_executor(get_process_pool(), _worker_embed_batch, texts_to_embed)
+        
+        for vec, payload in zip(vectors, payload_blueprints):
+            points.append(PointStruct(
                 id=str(uuid.uuid4()),
                 vector=vec,
                 payload=payload
-            )   
-        )
+            ))
 
     # ---- 5️⃣ Bulk upsert ---------------------------------------------------
     if points:

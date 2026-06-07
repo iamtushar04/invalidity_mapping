@@ -110,6 +110,8 @@ async def generate_or_fetch_claim_chart(
     chart_rows = []
     claim_id = None
     seen_elements = set()
+    llm_score = 0.0
+    total_weight = 0.0
     
     for m in mappings:
         claim_id = m.claim_id
@@ -187,13 +189,24 @@ async def generate_or_fetch_claim_chart(
         if isinstance(display_cited_passage, dict):
             display_cited_passage = display_cited_passage.get("display_text", "")
 
+        final_class = m.analyst_classification or m.classification
+        
+        weight = float(el.weight) if el and el.weight else 1.0
+        impact = 0.0
+        if final_class == "Y": impact = 1.0
+        elif final_class == "Obviousness": impact = 0.75
+        elif final_class in ("Partial", "P"): impact = 0.50
+        llm_score += weight * impact
+        total_weight += weight
+
         chart_rows.append({
             "element_id": element_str_id,
             "claim_text": claim_text,
             "cited_passage": m.analyst_override or display_cited_passage or "",
             "para_ref": m.para_ref or "",
             "fig_ref": m.fig_ref or "",
-            "rationale": m.rationale or ""
+            "rationale": m.rationale or "",
+            "classification": final_class
         })
         
     # Sort chronologically (Natural Sort)
@@ -202,12 +215,15 @@ async def generate_or_fetch_claim_chart(
         
     chart_rows.sort(key=lambda c: natural_keys(c["element_id"]))
     
+    final_llm_score = (llm_score / total_weight * 100.0) if total_weight > 0 else 0.0
+    
     # Store chart record
     chart = ClaimChart(
         project_id=project_id,
         reference_patent_id=reference_patent_id,
         claim_id=claim_id,
-        chart_rows=chart_rows
+        chart_rows=chart_rows,
+        llm_score=final_llm_score
     )
     db.add(chart)
     await commit_with_retry(db)  # Retry up to 3x if DB blinks during the save

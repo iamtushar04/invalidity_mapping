@@ -130,6 +130,14 @@ async def on_startup():
     except Exception as e:
         sweeper_logger.error(f"Startup Sweeper: Error during desync scan: {e}")
 
+@app.on_event("shutdown")
+async def on_shutdown():
+    import logging
+    from app.embedding.qdrant_service import get_process_pool
+    logger = logging.getLogger(__name__)
+    logger.info("Shutting down the ProcessPoolExecutor for embedding...")
+    get_process_pool().shutdown(wait=True)
+
 # Register routers
 app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["Authentication"])
 app.include_router(projects.router, prefix=f"{settings.API_V1_STR}/projects", tags=["Projects"])
