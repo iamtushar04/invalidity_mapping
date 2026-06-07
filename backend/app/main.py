@@ -129,6 +129,10 @@ async def on_startup():
             sweeper_logger.info(f"Startup Sweeper: Fixed {desync_count} desync patent(s) — Postgres reset to 'failed', ready for retry.")
     except Exception as e:
         sweeper_logger.error(f"Startup Sweeper: Error during desync scan: {e}")
+        
+    from app.embedding.qdrant_service import async_prewarm_workers
+    import asyncio
+    asyncio.create_task(async_prewarm_workers())
 
 @app.on_event("shutdown")
 async def on_shutdown():

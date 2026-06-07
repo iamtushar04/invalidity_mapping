@@ -342,44 +342,55 @@ export default function ProjectAnalysisPage() {
       }
       
       // Start polling
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}/ingestion-status`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            if (statusData.status === "processing" || statusData.status === "pending") {
-              setIngestStreamStatus(statusData.message || "Processing...");
-              setIngestStreamProgress(statusData.progress || 0);
-            } else if (statusData.status === "success") {
-              clearInterval(pollInterval);
-              setIngestStreamStatus("Success! Fetching final patent data...");
-              setIngestStreamProgress(100);
-              // Fetch the final patent data
-              const finalRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}`, {
-                headers: { Authorization: `Bearer ${token}` }
-              });
-              if (finalRes.ok) {
-                const finalData = await finalRes.json();
-                setPatentData(finalData);
-                setStep(1); // Go to detail review
-              }
-            } else if (statusData.status === "failed") {
-              clearInterval(pollInterval);
-              throw new Error(statusData.message || "Background ingestion failed.");
-            }
-          }
-        } catch (pollErr: any) {
-          clearInterval(pollInterval);
-          setError(pollErr.message);
-        }
-      }, 2000);
+      startIngestionPolling(cleanedPatentNum);
 
     } catch (err: any) {
       setError(err.message);
     }
   };
+
+  const startIngestionPolling = (patentNumber?: string) => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}/ingestion-status`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.status === "processing" || statusData.status === "pending") {
+            setIngestStreamStatus(statusData.message || "Processing...");
+            setIngestStreamProgress(statusData.progress || 0);
+          } else if (statusData.status === "success") {
+            clearInterval(pollInterval);
+            setIngestStreamStatus("Success! Fetching final patent data...");
+            setIngestStreamProgress(100);
+            // Fetch the final patent data
+            const finalRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (finalRes.ok) {
+              const finalData = await finalRes.json();
+              setPatentData(finalData);
+              setStep(1); // Go to detail review
+            }
+          } else if (statusData.status === "failed") {
+            clearInterval(pollInterval);
+            if (patentNumber) throw new Error(statusData.message || "Background ingestion failed.");
+          }
+        }
+      } catch (pollErr: any) {
+        clearInterval(pollInterval);
+        setError(pollErr.message);
+      }
+    }, 2000);
+  };
+
+  // Resume polling on mount if we are on step 0
+  useEffect(() => {
+    if (token && projectId && step === 0) {
+      startIngestionPolling();
+    }
+  }, [token, projectId, step]);
 
   // Phase 2: Claim Selection
   const toggleClaimSelection = (claimId: string) => {

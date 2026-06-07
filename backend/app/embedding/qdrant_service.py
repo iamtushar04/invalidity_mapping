@@ -32,7 +32,8 @@ from app.embedding.text_utils import (
 # ---------------------------------------------------------------------------
 
 print("Getting Data From")
-_MODEL = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu")
+# _MODEL = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu")
+_MODEL = SentenceTransformer("BAAI/bge-base-en-v1.5", device="cpu")
 
 def _worker_embed_batch(texts: List[str]) -> List[List[float]]:
     """Worker function to embed a batch of texts using the globally loaded model."""
@@ -46,8 +47,18 @@ PROCESS_POOL = None
 def get_process_pool():
     global PROCESS_POOL
     if PROCESS_POOL is None:
-        PROCESS_POOL = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+        PROCESS_POOL = concurrent.futures.ProcessPoolExecutor(max_workers=3)
     return PROCESS_POOL
+
+async def async_prewarm_workers():
+    """Silently load the SentenceTransformer model into the CPU workers on startup."""
+    logger.info("Initializing background pre-warm sequence for CPU workers...")
+    pool = get_process_pool()
+    loop = asyncio.get_running_loop()
+    # Send a dummy embedding task to all workers simultaneously (we have 3 per Uvicorn worker)
+    tasks = [loop.run_in_executor(pool, _worker_embed_batch, ["warmup text"]) for _ in range(3)]
+    await asyncio.gather(*tasks)
+    logger.info("CPU workers successfully pre-warmed and ready for instant embedding!")
 
 _QDRANT_HOST = getattr(settings, "QDRANT_HOST", "localhost")
 _QDRANT_PORT = getattr(settings, "QDRANT_PORT", 6333)
@@ -61,8 +72,11 @@ _CLIENT = QdrantClient(
     timeout=3600.0  # 1 hour timeout (effectively waits until done)
 )
 
-_COLLECTION_NAME = "matrix_mapping_wissen"
-_VECTOR_SIZE = 1024
+
+# _COLLECTION_NAME = "matrix_mapping_wissen"
+# _VECTOR_SIZE = 1024
+_COLLECTION_NAME = "matrix_mapping_wissen_base"
+_VECTOR_SIZE = 768
 
 # ---------------------------------------------------------------------------
 # Helper utilities
