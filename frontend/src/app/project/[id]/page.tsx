@@ -353,37 +353,55 @@ export default function ProjectAnalysisPage() {
   const startIngestionPolling = (patentNumber?: string) => {
     if (ingestIntervalRef.current) {
       clearInterval(ingestIntervalRef.current);
+      ingestIntervalRef.current = null;
     }
     ingestIntervalRef.current = setInterval(async () => {
       try {
         const statusRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}/ingestion-status`, {
           headers: { Authorization: `Bearer ${token}` }
         });
+        
+        // Prevent state updates if polling was cancelled while fetch was in-flight
+        if (!ingestIntervalRef.current) return;
+
         if (statusRes.ok) {
           const statusData = await statusRes.json();
           if (statusData.status === "processing" || statusData.status === "pending") {
             setIngestStreamStatus(statusData.message || "Processing...");
             setIngestStreamProgress(statusData.progress || 0);
           } else if (statusData.status === "success") {
-            if (ingestIntervalRef.current) clearInterval(ingestIntervalRef.current);
+            if (ingestIntervalRef.current) {
+              clearInterval(ingestIntervalRef.current);
+              ingestIntervalRef.current = null;
+            }
             setIngestStreamStatus("Success! Fetching final patent data...");
             setIngestStreamProgress(100);
             // Fetch the final patent data
             const finalRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}`, {
               headers: { Authorization: `Bearer ${token}` }
             });
+            
+            // Final check to ensure we haven't navigated away
+            if (!ingestIntervalRef.current && step !== 0) return;
+            
             if (finalRes.ok) {
               const finalData = await finalRes.json();
               setPatentData(finalData);
               setStep(1); // Go to detail review
             }
           } else if (statusData.status === "failed") {
-            if (ingestIntervalRef.current) clearInterval(ingestIntervalRef.current);
+            if (ingestIntervalRef.current) {
+              clearInterval(ingestIntervalRef.current);
+              ingestIntervalRef.current = null;
+            }
             if (patentNumber) throw new Error(statusData.message || "Background ingestion failed.");
           }
         }
       } catch (pollErr: any) {
-        if (ingestIntervalRef.current) clearInterval(ingestIntervalRef.current);
+        if (ingestIntervalRef.current) {
+          clearInterval(ingestIntervalRef.current);
+          ingestIntervalRef.current = null;
+        }
         setError(pollErr.message);
       }
     }, 2000);
@@ -397,6 +415,7 @@ export default function ProjectAnalysisPage() {
     return () => {
       if (ingestIntervalRef.current) {
         clearInterval(ingestIntervalRef.current);
+        ingestIntervalRef.current = null;
       }
     };
   }, [token, projectId, step]);
