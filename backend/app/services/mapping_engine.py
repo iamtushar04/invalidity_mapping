@@ -106,7 +106,7 @@ class MappingEngineService:
 
         return {
             "classification": classification,
-            "cited_passage": f"[Score: {max_score:.2f}] {cited_passage}\n\nAnalysis deferred. Select this patent and click 'Create Chart' to run AI for complete rationale.",
+            "cited_passage": f"[Score: {max_score * 100:.1f}%] {cited_passage}\n\nAnalysis deferred. Select this patent and click 'Create Chart' to run AI for complete rationale.",
             "para_ref": para_ref,
             "fig_ref": fig_ref,
             "rationale": "",

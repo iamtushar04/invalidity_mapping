@@ -42,9 +42,10 @@ export default function ProjectAnalysisPage() {
     if (saved !== null) return parseInt(saved, 10);
     return 0;
   };
-  const [step, setStepState] = useState<number>(0);
+  const [step, setStepState] = useState<number>(getInitialStep);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const ingestIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   // Streaming state for Step 0 ingestion
   const [ingestStreamStatus, setIngestStreamStatus] = useState<string | null>(null);
@@ -350,7 +351,10 @@ export default function ProjectAnalysisPage() {
   };
 
   const startIngestionPolling = (patentNumber?: string) => {
-    const pollInterval = setInterval(async () => {
+    if (ingestIntervalRef.current) {
+      clearInterval(ingestIntervalRef.current);
+    }
+    ingestIntervalRef.current = setInterval(async () => {
       try {
         const statusRes = await fetch(`${BACKEND_URL}/patents/project/${projectId}/ingestion-status`, {
           headers: { Authorization: `Bearer ${token}` }
@@ -361,7 +365,7 @@ export default function ProjectAnalysisPage() {
             setIngestStreamStatus(statusData.message || "Processing...");
             setIngestStreamProgress(statusData.progress || 0);
           } else if (statusData.status === "success") {
-            clearInterval(pollInterval);
+            if (ingestIntervalRef.current) clearInterval(ingestIntervalRef.current);
             setIngestStreamStatus("Success! Fetching final patent data...");
             setIngestStreamProgress(100);
             // Fetch the final patent data
@@ -374,12 +378,12 @@ export default function ProjectAnalysisPage() {
               setStep(1); // Go to detail review
             }
           } else if (statusData.status === "failed") {
-            clearInterval(pollInterval);
+            if (ingestIntervalRef.current) clearInterval(ingestIntervalRef.current);
             if (patentNumber) throw new Error(statusData.message || "Background ingestion failed.");
           }
         }
       } catch (pollErr: any) {
-        clearInterval(pollInterval);
+        if (ingestIntervalRef.current) clearInterval(ingestIntervalRef.current);
         setError(pollErr.message);
       }
     }, 2000);
@@ -390,6 +394,11 @@ export default function ProjectAnalysisPage() {
     if (token && projectId && step === 0) {
       startIngestionPolling();
     }
+    return () => {
+      if (ingestIntervalRef.current) {
+        clearInterval(ingestIntervalRef.current);
+      }
+    };
   }, [token, projectId, step]);
 
   // Phase 2: Claim Selection
