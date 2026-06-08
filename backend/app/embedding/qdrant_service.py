@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 import uuid
 import asyncio
 import concurrent.futures
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 import logging
@@ -32,14 +32,14 @@ from app.embedding.text_utils import (
 # ---------------------------------------------------------------------------
 
 print("Getting Data From")
-# _MODEL = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu")
-_MODEL = SentenceTransformer("BAAI/bge-base-en-v1.5", device="cpu")
+_MODEL = TextEmbedding("BAAI/bge-base-en-v1.5")
 
 def _worker_embed_batch(texts: List[str]) -> List[List[float]]:
     """Worker function to embed a batch of texts using the globally loaded model."""
     from app.embedding.text_utils import normalize_text
     normalized_texts = [normalize_text(t) for t in texts]
-    embeddings = _MODEL.encode(normalized_texts, batch_size=64, normalize_embeddings=True)
+    # FastEmbed returns an iterator of numpy arrays
+    embeddings = list(_MODEL.embed(normalized_texts, batch_size=64))
     return [emb.tolist() for emb in embeddings]
 
 PROCESS_POOL = None
@@ -155,8 +155,7 @@ def _search_vectors(query_vector: List[float], search_filter: Any = None, limit:
 
 def _embed_text(text: str) -> List[float]:
     """Return the embedding vector for *text* using the loaded model."""
-    # normalize_embeddings=True is required for BAAI/bge models with cosine distance
-    return _MODEL.encode([normalize_text(text)], normalize_embeddings=True)[0].tolist()
+    return list(_MODEL.embed([normalize_text(text)]))[0].tolist()
 
 def _skip(text: Any) -> bool:
     """Return ``True`` if the supplied text should be ignored for embedding."""

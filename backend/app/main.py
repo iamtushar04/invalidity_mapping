@@ -67,7 +67,7 @@ async def run_startup_sweeper():
                 orphaned_count += result.rowcount
                 
         # 2. Reset Redis orphaned statuses
-        async for key in redis_client.scan_iter("embed_status:*"):
+        async for key in redis_client.scan_iter("embed:*"):
             redis_val = await redis_client.get(key)
             if redis_val in active_statuses:
                 await redis_client.set(key, "failed")
@@ -87,7 +87,7 @@ async def on_startup():
     # async with engine.begin() as conn:
     #     await conn.run_sync(Base.metadata.create_all)
         
-    # asyncio.create_task(run_startup_sweeper())
+    asyncio.create_task(run_startup_sweeper())
     
     # from app.embedding.qdrant_service import async_prewarm_workers
     # asyncio.create_task(async_prewarm_workers())

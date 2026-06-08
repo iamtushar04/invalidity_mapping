@@ -48,54 +48,78 @@ async def queue_prior_art_numbers(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         
     # Split manual list by any combination of commas, spaces, tabs, or newlines
-    numbers = [n.strip() for n in re.split(r'[,\s]+', req.patent_numbers) if n.strip()]
-    print("numbers => ",numbers)
-      
+    raw_numbers = [n.strip() for n in re.split(r'[,\s]+', req.patent_numbers) if n.strip()]
+    
+    # 1. In-memory deduplication
+    unique_numbers = []
+    seen_in_request = set()
+    for n in raw_numbers:
+        if n not in seen_in_request:
+            unique_numbers.append(n)
+            seen_in_request.add(n)
+    
+    # Count duplicates provided within the request itself
+    intra_request_duplicates = len(raw_numbers) - len(unique_numbers)
+    
+    # 2. Bulk fetch existing patents
+    if not unique_numbers:
+        return {"status": "queued", "count": 0, "duplicates_skipped": intra_request_duplicates}
+
+    res_pat = await db.execute(
+        select(Patent).where(
+            Patent.project_id == project_id,
+            Patent.patent_number.in_(unique_numbers)
+        )
+    )
+    existing_patents = {p.patent_number: p for p in res_pat.scalars().all()}
+    
+    # 3. Bulk fetch Redis statuses for patents marked "success"
+    success_patents = [p.patent_number for p in existing_patents.values() if p.fetch_status == "success"]
+    redis_statuses = {}
+    if success_patents:
+        redis_statuses = await get_all_embed_statuses(str(project_id), success_patents)
+
     added_numbers = []
     duplicate_numbers = []
-    # Store reference patent placeholders in DB
-    for num in numbers:
-        # Check if already added
-        res_pat = await db.execute(
-            select(Patent).where(Patent.project_id == project_id, Patent.patent_number == num)
-        )
-        existing_patent = res_pat.scalars().first()
+    new_patents_to_insert = []
+    
+    # 4. Classification
+    for num in unique_numbers:
+        existing_patent = existing_patents.get(num)
+        
         if existing_patent:
             if existing_patent.fetch_status == "failed":
-                # Automatically retry failed patents instead of calling them duplicates
                 existing_patent.fetch_status = "pending"
                 await set_embed_status(str(project_id), num, "pending")
                 added_numbers.append(num)
-                continue
             elif existing_patent.fetch_status == "success":
-                # Fix #3: Check for desync — Postgres says "success" but Redis shows
-                # an active stale status, meaning Qdrant embedding never completed.
-                redis_status = await get_embed_status(str(project_id), num)
+                redis_status = redis_statuses.get(num, "done")
                 if redis_status in ("fetching", "pending", "embedding"):
-                    # Desync detected — treat as failed and re-queue
                     logger.warning(f"Desync detected for patent {num}: Postgres=success but Redis={redis_status}. Re-queuing.")
                     existing_patent.fetch_status = "pending"
                     await set_embed_status(str(project_id), num, "pending")
                     added_numbers.append(num)
-                    continue
                 else:
-                    # Genuinely successful — treat as duplicate
                     duplicate_numbers.append(num)
-                    continue
             else:
                 duplicate_numbers.append(num)
-                continue
-        
-        patent = Patent(
-            project_id=project_id,
-            patent_number=num,
-            is_reference=True,
-            fetch_status="pending"
-        )
-        db.add(patent)
-        added_numbers.append(num)
+        else:
+            patent = Patent(
+                project_id=project_id,
+                patent_number=num,
+                is_reference=True,
+                fetch_status="pending"
+            )
+            new_patents_to_insert.append(patent)
+            added_numbers.append(num)
+            
+    # 5. Bulk insert and commit
+    if new_patents_to_insert:
+        db.add_all(new_patents_to_insert)
         
     await db.commit()
+    
+    total_duplicates_skipped = len(duplicate_numbers) + intra_request_duplicates
 
     # Trigger parallel fetch & embed pipeline in the background
     if added_numbers:
@@ -105,13 +129,13 @@ async def queue_prior_art_numbers(
             str(current_user.id), 
             added_numbers
         )
-    elif duplicate_numbers:
-        if len(numbers) == 1:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Patent {numbers[0]} is already present in this project.")
+    elif duplicate_numbers or intra_request_duplicates:
+        if len(raw_numbers) == 1:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Patent {raw_numbers[0]} is already present in this project.")
         else:
-            return {"status": "duplicate", "message": "All provided patents are already present.", "duplicates_skipped": len(duplicate_numbers)}
+            return {"status": "duplicate", "message": "All provided patents are already present.", "duplicates_skipped": total_duplicates_skipped}
 
-    return {"status": "queued", "count": len(added_numbers), "duplicates_skipped": len(duplicate_numbers)}
+    return {"status": "queued", "count": len(added_numbers), "duplicates_skipped": total_duplicates_skipped}
 
 @router.get("/{project_id}/embed-status", status_code=status.HTTP_200_OK)
 async def get_project_embed_statuses(
@@ -153,42 +177,64 @@ async def upload_prior_art_excel(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         
     content = await file.read()
-    numbers = excel_parser.parse_patent_numbers(io.BytesIO(content))
-    if not numbers:
+    raw_numbers = excel_parser.parse_patent_numbers(io.BytesIO(content))
+    if not raw_numbers:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to parse patent numbers from Column A."
         )
         
+    # 1. In-memory deduplication
+    unique_numbers = []
+    seen_in_request = set()
+    for n in raw_numbers:
+        if n not in seen_in_request:
+            unique_numbers.append(n)
+            seen_in_request.add(n)
+            
+    intra_request_duplicates = len(raw_numbers) - len(unique_numbers)
+
+    # 2. Bulk fetch existing patents
+    res_pat = await db.execute(
+        select(Patent).where(
+            Patent.project_id == project_id,
+            Patent.patent_number.in_(unique_numbers)
+        )
+    )
+    existing_patents = {p.patent_number: p for p in res_pat.scalars().all()}
+    
     added_numbers = []
     duplicate_numbers = []
-    for num in numbers:
-        # Check if already added
-        res_pat = await db.execute(
-            select(Patent).where(Patent.project_id == project_id, Patent.patent_number == num)
-        )
-        existing_patent = res_pat.scalars().first()
+    new_patents_to_insert = []
+    
+    # 3. Classification
+    for num in unique_numbers:
+        existing_patent = existing_patents.get(num)
+        
         if existing_patent:
             if existing_patent.fetch_status == "failed":
-                # Automatically retry failed patents in excel upload as well
                 existing_patent.fetch_status = "pending"
                 await set_embed_status(str(project_id), num, "pending")
                 added_numbers.append(num)
-                continue
             else:
                 duplicate_numbers.append(num)
-                continue
+        else:
+            patent = Patent(
+                project_id=project_id,
+                patent_number=num,
+                is_reference=True,
+                fetch_status="pending"
+            )
+            new_patents_to_insert.append(patent)
+            added_numbers.append(num)
             
-        patent = Patent(
-            project_id=project_id,
-            patent_number=num,
-            is_reference=True,
-            fetch_status="pending"
-        )
-        db.add(patent)
-        added_numbers.append(num)
+    # 4. Bulk insert and commit
+    if new_patents_to_insert:
+        db.add_all(new_patents_to_insert)
         
     await db.commit()
+    
+    total_duplicates_skipped = len(duplicate_numbers) + intra_request_duplicates
     
     # Trigger parallel fetch & embed pipeline in the background
     if added_numbers:
@@ -198,13 +244,13 @@ async def upload_prior_art_excel(
             str(current_user.id), 
             added_numbers
         )
-    elif duplicate_numbers:
-        if len(numbers) == 1:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Patent {numbers[0]} is already present in this project.")
+    elif duplicate_numbers or intra_request_duplicates:
+        if len(raw_numbers) == 1:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Patent {raw_numbers[0]} is already present in this project.")
         else:
-            return {"status": "duplicate", "message": "All provided patents are already present.", "duplicates_skipped": len(duplicate_numbers)}
+            return {"status": "duplicate", "message": "All provided patents are already present.", "duplicates_skipped": total_duplicates_skipped}
 
-    return {"status": "queued", "count": len(added_numbers), "duplicates_skipped": len(duplicate_numbers)}
+    return {"status": "queued", "count": len(added_numbers), "duplicates_skipped": total_duplicates_skipped}
 
 @router.post("/{project_id}/patent/{patent_number}/embed", status_code=status.HTTP_200_OK)
 async def embed_single_patent(
