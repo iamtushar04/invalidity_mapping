@@ -26,7 +26,13 @@ def chunk_full_claim(
             split_at = chunk_size
 
         chunks.append(remaining[:split_at].strip())
-        remaining = remaining[max(0, split_at - chunk_overlap):]
+        
+        # Prevent infinite loop: remaining MUST shrink!
+        next_start = split_at - chunk_overlap
+        if next_start <= 0:
+            next_start = split_at  # Force it to shrink by the exact chunk we extracted
+            
+        remaining = remaining[next_start:]
 
     if remaining.strip():
         chunks.append(remaining.strip())
