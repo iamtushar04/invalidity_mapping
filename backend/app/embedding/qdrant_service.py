@@ -45,9 +45,34 @@ def _worker_embed_batch(texts: List[str]) -> List[List[float]]:
 PROCESS_POOL = None
 
 def get_process_pool():
+    """Returns a healthy ProcessPoolExecutor. Auto-rebuilds if any workers have crashed."""
     global PROCESS_POOL
+
+    # Health check: inspect each worker process for a non-zero exit code (crash)
+    if PROCESS_POOL is not None:
+        try:
+            broken = [
+                p for p in PROCESS_POOL._processes.values()
+                if p.exitcode is not None and p.exitcode != 0
+            ]
+            if broken:
+                logger.warning(
+                    f"[ProcessPool] Detected {len(broken)} dead worker(s). "
+                    "Shutting down and rebuilding pool..."
+                )
+                PROCESS_POOL.shutdown(wait=False, cancel_futures=True)
+                PROCESS_POOL = None
+        except Exception as check_err:
+            logger.warning(
+                f"[ProcessPool] Health check failed ({check_err}). Rebuilding pool as a precaution."
+            )
+            PROCESS_POOL = None
+
+    # Build a fresh pool if needed
     if PROCESS_POOL is None:
         PROCESS_POOL = concurrent.futures.ProcessPoolExecutor(max_workers=3)
+        logger.info("[ProcessPool] ProcessPoolExecutor created/rebuilt with 3 workers.")
+
     return PROCESS_POOL
 
 async def async_prewarm_workers():
@@ -329,8 +354,27 @@ async def embed_patent(
     if texts_to_embed:
         logger.info(f"Batch embedding {len(texts_to_embed)} text chunks via Process Pool...")
         loop = asyncio.get_running_loop()
-        vectors = await loop.run_in_executor(get_process_pool(), _worker_embed_batch, texts_to_embed)
-        
+
+        try:
+            # 10-minute timeout prevents infinite hangs if a CPU worker gets stuck
+            vectors = await asyncio.wait_for(
+                loop.run_in_executor(get_process_pool(), _worker_embed_batch, texts_to_embed),
+                timeout=600
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[ProcessPool] Embedding timed out after 600s for patent {canonical_patent}. "
+                "Forcing pool rebuild to clear the stuck worker."
+            )
+            # Force-kill the stuck pool so the next patent gets a fresh set of workers
+            global PROCESS_POOL
+            if PROCESS_POOL is not None:
+                PROCESS_POOL.shutdown(wait=False, cancel_futures=True)
+                PROCESS_POOL = None
+            raise RuntimeError(
+                f"Embedding timed out after 600s for patent {canonical_patent}"
+            )
+
         for vec, payload in zip(vectors, payload_blueprints):
             points.append(PointStruct(
                 id=str(uuid.uuid4()),
