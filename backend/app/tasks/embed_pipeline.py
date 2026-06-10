@@ -55,14 +55,16 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                 # 1b. Fetch LLM enriched data (needed for Postgres DB)
                 enriched_data = await patent_fetch_service.fetch_patent(patent_number)
             logger.info("Successfully fetched raw data for patent %s", patent_number)
-            # Parse data out of the raw fetch results for Qdrant
-            s_abstract = get_abstract(raw_data)
-            s_claims = convert_claims(raw_data)
-            s_desc = process_structured_description(
-                structured_description=raw_data.get("structured_description", []),
-                patent_number=raw_data.get("patent_number", patent_number),
-                title=raw_data.get("title", ""),
-                classifications=raw_data.get("classifications", [])
+            # Parse data out of the raw fetch results for Qdrant using background threads
+            # This prevents the Python Event Loop from freezing during heavy HTML parsing!
+            s_abstract = await asyncio.to_thread(get_abstract, raw_data)
+            s_claims = await asyncio.to_thread(convert_claims, raw_data)
+            s_desc = await asyncio.to_thread(
+                process_structured_description,
+                raw_data.get("structured_description", []),
+                raw_data.get("patent_number", patent_number),
+                raw_data.get("title", ""),
+                raw_data.get("classifications", [])
             )
             canonical_patent = normalize_patent_number(raw_data.get("patent_number") or patent_number)
 
