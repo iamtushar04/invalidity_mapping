@@ -32,6 +32,26 @@ async def set_embed_status(project_id: str, patent_number: str, status: str):
     except Exception as e:
         logger.error(f"Failed to set redis status for {key}: {e}")
 
+async def bulk_refresh_pending_statuses(project_id: str, patent_numbers: list[str]):
+    """
+    PROFESSIONAL FIX: Uses a Redis Pipeline to instantly bulk-update the TTL 
+    for thousands of patents simultaneously using exactly 1 TCP connection.
+    """
+    if not patent_numbers:
+        return
+        
+    try:
+        # Create a single pipeline for all commands
+        async with redis_client.pipeline(transaction=False) as pipe:
+            for p in patent_numbers:
+                key = f"embed:{project_id}:{p}"
+                pipe.setex(key, 1200, "pending")
+            # Execute all 10,000+ commands in a single network burst
+            await pipe.execute()
+        logger.info(f"Bulk refreshed TTL for {len(patent_numbers)} pending patents in project {project_id}.")
+    except Exception as e:
+        logger.error(f"Failed to bulk refresh redis statuses for project {project_id}: {e}")
+
 async def get_embed_status(project_id: str, patent_number: str) -> str | None:
     """
     Get the embed status for a single patent.

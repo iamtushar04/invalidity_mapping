@@ -350,8 +350,9 @@ async def background_batch_embed(project_id: str, user_id: str, patent_numbers: 
             # Refresh Redis TTL to 20 minutes for anything still sitting in the queue
             remaining_patents = list(queue._queue)
             if remaining_patents:
-                refresh_tasks = [set_embed_status(project_id, p, "pending") for p in remaining_patents]
-                await asyncio.gather(*refresh_tasks)
+                from app.services.redis_service import bulk_refresh_pending_statuses
+                # Update instantly via Redis Pipeline (uses only 1 connection!)
+                await bulk_refresh_pending_statuses(project_id, remaining_patents)
             
             # Go to sleep for 5 minutes before checking and refreshing again
             await asyncio.sleep(300)
