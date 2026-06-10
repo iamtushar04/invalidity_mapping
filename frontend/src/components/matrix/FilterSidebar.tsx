@@ -11,7 +11,7 @@ export default function FilterSidebar({ FilteredMatrix, matrixFilter, setMatrixF
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   return (
-    <div className={`transition-all duration-300 ${isCollapsed ? 'w-14' : 'w-64'} shrink-0 flex flex-col gap-4 border-r border-slate-800/60 pr-4`}>
+    <div className={`transition-all duration-300 ${isCollapsed ? 'w-14' : 'w-64'} shrink-0 flex flex-col gap-4 border-r border-slate-800/60 pr-4 sticky top-6 self-start max-h-[calc(100vh-3rem)] overflow-y-auto`}>
        <div className="flex items-center justify-between">
           {!isCollapsed && <h3 className="font-bold text-xs uppercase tracking-widest font-mono text-slate-400">Filter Matrix</h3>}
           {isCollapsed && <Filter className="w-5 h-5 text-slate-500 mx-auto" />}

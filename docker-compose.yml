@@ -9,56 +9,24 @@ services:
     ports:
       - "8005:8005"
     volumes:
-      - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
+      - ./backend/logs:/app/logs
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8005
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     env_file:
       - ./backend/.env
-  #    depends_on:
-  #      - postgres
-  #      - qdrant
-  #      - redis
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000" # Maps port 3000 on your machine to Next.js port 3000
+      - "3000:3000"
     depends_on:
       - backend
-    volumes:
-      # <-- ADD THIS SECTION
-      - ./frontend:/app # Maps your local code to the container
-      - /app/node_modules
-    command: npm run dev # <-- OVERRIDE TO DEV SERVER
+    command: npm run start
     environment:
-      # <-- ADD THIS SECTION
-      - WATCHPACK_POLLING=true # Forces Next.js to detect file changes on Windows
-  # Uncomment this redis, qdrant and postgress if you need works on local
-  #  redis:
-  #    image: redis:7-alpine
-  #    ports:
-  #      - "6379:6379"
-
-  #  qdrant:
-  #    image: qdrant/qdrant:latest
-  #    ports:
-  #      - "6333:6333"
-  #    volumes:
-  #      - qdrant_data:/qdrant/storage
-
-  #  postgres:
-  #    image: postgres:15-alpine
-  #    environment:
-  #      POSTGRES_USER: postgres
-  #      POSTGRES_PASSWORD: wissen67
-  #      POSTGRES_DB: postgres
-  #    ports:
-  #      - "5432:5432"
-  #    volumes:
-  #      - postgres_data:/var/lib/postgresql/data
+      - NODE_ENV=production
 
   # 1. OpenTelemetry Collector — receives traces from FastAPI, fans out to Tempo
   otel-collector:
@@ -111,9 +79,8 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
 
 volumes:
-  #  qdrant_data:
-  #  postgres_data:
   tempo_data:
   loki_data:
   grafana_data:
   prometheus_data:
+

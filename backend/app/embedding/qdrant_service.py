@@ -7,7 +7,7 @@
 """
 from qdrant_client.models import VectorParams, Distance
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import uuid
 import asyncio
 import concurrent.futures
@@ -352,6 +352,7 @@ async def search_element_in_prior_art(
     project_id: str,
     user_id: str,
     top_k: int = 20,
+    exclude_ids: Optional[List[str]] = None,
 ) -> List[Any]:
     """Search for an element in Qdrant, scoped to project, user, and patent number(s).
 
@@ -378,25 +379,22 @@ async def search_element_in_prior_art(
         for num in patent_variants
     ]
 
+    must_conditions = [
+        FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
+        FieldCondition(key="user_id",    match=MatchValue(value=str(user_id))),
+    ]
     if len(patent_conditions) == 1:
-        # Single patent — add directly to must
-        search_filter = Filter(
-            must=[
-                FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
-                FieldCondition(key="user_id",    match=MatchValue(value=str(user_id))),
-                patent_conditions[0],
-            ]
-        )
+        must_conditions.append(patent_conditions[0])
     else:
-        # Multiple patents — nest a should-filter inside must
-        search_filter = Filter(
-            must=[
-                FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
-                FieldCondition(key="user_id",    match=MatchValue(value=str(user_id))),
-                # Nested filter: at least ONE patent variant must match
-                Filter(should=patent_conditions),
-            ]
-        )
+        must_conditions.append(Filter(should=patent_conditions))
+
+    search_filter_kwargs = {"must": must_conditions}
+    
+    if exclude_ids:
+        from qdrant_client.models import HasIdCondition
+        search_filter_kwargs["must_not"] = [HasIdCondition(has_id=exclude_ids)]
+        
+    search_filter = Filter(**search_filter_kwargs)
 
     raw_results = await asyncio.to_thread(
         _search_vectors,

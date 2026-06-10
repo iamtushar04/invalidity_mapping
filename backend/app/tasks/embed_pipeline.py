@@ -152,8 +152,8 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
             logger.info(f"Retrying patent {patent_number} in {sleep_time:.1f}s (attempt {attempt + 1}/{max_retries})")
             await asyncio.sleep(sleep_time)
 
-@tracer.start_as_current_span("background_batch_embed")
-async def background_batch_embed(project_id: str, user_id: str, patent_numbers: list[str]):
+# --- DEPRECATED CHUNK-BASED BATCH EMBED (KEPT FOR REFERENCE) ---
+async def _old_background_batch_embed(project_id: str, user_id: str, patent_numbers: list[str]):
     """
     Background task to run the pipeline for multiple patents concurrently in chunks of 5.
     Creates AnalysisJob tracking records and triggers matrix processing dynamically per chunk.
@@ -240,7 +240,134 @@ async def background_batch_embed(project_id: str, user_id: str, patent_numbers: 
                         await db.commit()
                         
                         logger.info(f"Auto-triggering obviousness analysis for {len(chunk_patents)} chunk patents across {len(project.selected_claim_ids)} claims.")
+                        chunk_patent_ids = [pat.id for pat in chunk_patents]
                         for claim_id in project.selected_claim_ids:
-                            asyncio.create_task(run_obviousness_mapping_task(project.id, claim_id))
+                            asyncio.create_task(run_obviousness_mapping_task(project.id, claim_id, chunk_patent_ids))
         except Exception as e:
             logger.error(f"Failed to auto-trigger obviousness analysis: {e}")
+
+        # --- HEARTBEAT FOR REMAINING PATENTS ---
+        # Refresh the Redis TTL for all remaining patents in the queue to prevent false-positive Sweeper failures
+        remaining_patents = patent_numbers[i + chunk_size:]
+        if remaining_patents:
+            refresh_tasks = [
+                set_embed_status(project_id, p, "pending")
+                for p in remaining_patents
+            ]
+            await asyncio.gather(*refresh_tasks)
+
+@tracer.start_as_current_span("background_batch_embed")
+async def background_batch_embed(project_id: str, user_id: str, patent_numbers: list[str]):
+    """
+    Background task to run the pipeline for multiple patents using a Continuous Queue (Worker Pool).
+    Creates AnalysisJob tracking records and triggers matrix processing dynamically per patent instantly.
+    """
+    span = trace.get_current_span()
+    span.set_attribute("project_id", project_id)
+    span.set_attribute("patent_count", len(patent_numbers))
+    
+    if not patent_numbers:
+        return
+
+    # 1. Create the Queue and load all patents into it
+    queue = asyncio.Queue()
+    for p in patent_numbers:
+        # Set to pending initially
+        await set_embed_status(project_id, p, "pending")
+        queue.put_nowait(p)
+        
+    # 2. Define the continuous Worker
+    async def worker():
+        while True:
+            # Grab the next patent in line
+            current_patent = await queue.get()
+            try:
+                # Run the main pipeline (Fetch -> Embed -> Save)
+                await _pipeline_fetch_and_embed(project_id, user_id, current_patent)
+                
+                # --- INSTANT OBVIOUSNESS TRIGGER ---
+                # Check if it succeeded, and if so, trigger charting immediately
+                from app.models.project import Project
+                from sqlalchemy import select
+                import uuid
+                from app.tasks.background_jobs import run_obviousness_mapping_task
+                from app.models.analysis_job import AnalysisJob
+                
+                async with SessionLocal() as db:
+                    res_proj = await db.execute(select(Project).where(Project.id == uuid.UUID(project_id)))
+                    project = res_proj.scalars().first()
+                    
+                    if project and project.selected_claim_ids:
+                        res_pat = await db.execute(
+                            select(Patent).where(
+                                Patent.project_id == project_id,
+                                Patent.patent_number == current_patent,
+                                Patent.fetch_status == "success"
+                            )
+                        )
+                        pat = res_pat.scalars().first()
+                        
+                        if pat:
+                            # Queue AnalysisJob tracker record for the UI
+                            res_job = await db.execute(
+                                select(AnalysisJob).where(
+                                    AnalysisJob.project_id == project_id,
+                                    AnalysisJob.reference_patent_id == pat.id
+                                )
+                            )
+                            if not res_job.scalars().first():
+                                db.add(AnalysisJob(
+                                    project_id=project_id,
+                                    reference_patent_id=pat.id,
+                                    status="pending"
+                                ))
+                            await db.commit()
+                            
+                            # Fire background obviousness task instantly for this 1 patent
+                            for claim_id in project.selected_claim_ids:
+                                asyncio.create_task(run_obviousness_mapping_task(project.id, claim_id, [pat.id]))
+                                
+            except Exception as e:
+                logger.error(f"CRITICAL PIPELINE ERROR for patent {current_patent}: {e}")
+                try:
+                    await set_embed_status(project_id, current_patent, "failed")
+                    async with SessionLocal() as db:
+                        await db.execute(
+                            update(Patent)
+                            .where(Patent.project_id == project_id, Patent.patent_number == current_patent)
+                            .values(fetch_status="failed")
+                        )
+                        await db.commit()
+                except Exception as db_err:
+                    logger.error(f"Failed to force failure status: {db_err}")
+            finally:
+                # Always tell the queue this task is complete
+                queue.task_done()
+
+    # 3. Define the Heartbeat Daemon
+    async def heartbeat_daemon():
+        while True:
+            # Refresh Redis TTL to 20 minutes for anything still sitting in the queue
+            remaining_patents = list(queue._queue)
+            if remaining_patents:
+                refresh_tasks = [set_embed_status(project_id, p, "pending") for p in remaining_patents]
+                await asyncio.gather(*refresh_tasks)
+            
+            # Go to sleep for 5 minutes before checking and refreshing again
+            await asyncio.sleep(300)
+
+    # 4. Engine Start: Spawn workers and wait
+    # Launch exactly 8 continuous workers (5 for fetching + 3 for embedding simultaneously)
+    workers = [asyncio.create_task(worker()) for _ in range(8)]
+    
+    # Launch the 1 heartbeat daemon
+    heartbeat_task = asyncio.create_task(heartbeat_daemon())
+    
+    # Wait right here until the entire queue is completely empty
+    await queue.join()
+    
+    # Engine Stop: Clean up and kill the background tasks
+    for w in workers:
+        w.cancel()
+    heartbeat_task.cancel()
+    logger.info(f"Finished continuous queue batch processing for {len(patent_numbers)} patents.")

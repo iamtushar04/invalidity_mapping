@@ -160,7 +160,9 @@ async def get_obviousness_matrix(
             print(f"Fetch claim element {m.element_id} => {el}")
             if el:
                 display_cited_passage = m.cited_passage
+                saved_snippets = []
                 if isinstance(display_cited_passage, dict):
+                    saved_snippets = display_cited_passage.get("saved_snippets", [])
                     display_cited_passage = display_cited_passage.get("display_text", "")
                 elif not isinstance(display_cited_passage, str):
                     display_cited_passage = ""
@@ -169,6 +171,7 @@ async def get_obviousness_matrix(
                     "element_id": el.element_id,
                     "element_text": el.text,
                     "cited_passage": display_cited_passage,
+                    "saved_snippets": saved_snippets,
                     "classification": m.classification,
                     "analyst_classification": m.analyst_classification,
                 })

@@ -112,6 +112,7 @@ async def queue_prior_art_numbers(
             )
             new_patents_to_insert.append(patent)
             added_numbers.append(num)
+            await set_embed_status(str(project_id), num, "pending")
             
     # 5. Bulk insert and commit
     if new_patents_to_insert:
@@ -145,11 +146,11 @@ async def get_project_embed_statuses(
 ):
     """
     Get the embedding status for all prior art patents in a project.
-    Reads directly from Redis.
+    Reads directly from Redis and performs a zombie sweep if background jobs have died.
     """
     # Fetch all prior art patents for this project
     res = await db.execute(
-        select(Patent.patent_number)
+        select(Patent)
         .where(Patent.project_id == project_id, Patent.is_reference == True)
     )
     patents = res.scalars().all()
@@ -157,7 +158,28 @@ async def get_project_embed_statuses(
     if not patents:
         return {"statuses": {}}
 
-    statuses = await get_all_embed_statuses(str(project_id), patents)
+    patent_numbers = [p.patent_number for p in patents]
+    statuses = await get_all_embed_statuses(str(project_id), patent_numbers)
+    
+    # --- ZOMBIE SWEEPER ---
+    # If a patent is marked "pending" or "fetching" in Postgres, but its temporary
+    # Redis key has completely expired/disappeared, it means the background task 
+    # crashed or was killed by a server restart. We must forcefully mark it as "failed".
+    zombies_to_update = []
+    for p in patents:
+        if p.fetch_status in ("pending", "fetching", "embedding") and p.patent_number not in statuses:
+            p.fetch_status = "failed"
+            zombies_to_update.append(p)
+            statuses[p.patent_number] = "failed"
+            
+    if zombies_to_update:
+        for z in zombies_to_update:
+            db.add(z)
+            # Re-seed the failed status into Redis so the UI picks it up instantly
+            await set_embed_status(str(project_id), z.patent_number, "failed")
+        await db.commit()
+        logger.warning(f"Zombie Sweeper: Cleaned up {len(zombies_to_update)} dead patents for project {project_id}.")
+
     return {"statuses": statuses}
 
 @router.post("/{project_id}/upload", status_code=status.HTTP_202_ACCEPTED)
@@ -227,6 +249,7 @@ async def upload_prior_art_excel(
             )
             new_patents_to_insert.append(patent)
             added_numbers.append(num)
+            await set_embed_status(str(project_id), num, "pending")
             
     # 4. Bulk insert and commit
     if new_patents_to_insert:

@@ -36,6 +36,7 @@ export default function ProjectAnalysisPage() {
 
   // Loading & UI Step — synced with URL (?step=N) and localStorage
   const getInitialStep = () => {
+    if (typeof window === "undefined") return 0;
     const urlStep = searchParams.get("step");
     if (urlStep !== null) return parseInt(urlStep, 10);
     const saved = localStorage.getItem(`project-step-${params.id}`);
@@ -1448,7 +1449,7 @@ export default function ProjectAnalysisPage() {
             )}
 
             {matrixData && (
-              <div className="flex w-full overflow-hidden">
+              <div className="flex w-full gap-6 items-start">
                 <FilterSidebar 
                   FilteredMatrix={FilteredMatrix} 
                   matrixFilter={matrixFilter} 

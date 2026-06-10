@@ -121,6 +121,6 @@ def setup_logger():
     root_logger.addHandler(dynamic_handler)
     root_logger.addHandler(stream_handler)
     
-    # Force FastAPI/Uvicorn to use our router too
+    # Force FastAPI/Uvicorn to use our rout tooer
     logging.getLogger("uvicorn.access").handlers = [dynamic_handler, stream_handler]
     logging.getLogger("uvicorn.error").handlers = [dynamic_handler, stream_handler]

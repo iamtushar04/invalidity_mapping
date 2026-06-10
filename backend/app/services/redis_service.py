@@ -13,7 +13,8 @@ async def set_embed_status(project_id: str, patent_number: str, status: str):
     Keys are automatically expired.
     - If status is 'done', it expires in 24 hours (86400 seconds) so the UI can still show it.
     - If status is 'failed', it expires in 7 days (604800 seconds).
-    - Otherwise (pending/fetching/embedding), it expires in 2 hours (in case it gets stuck).
+    - If status is 'pending' (waiting in queue), it expires in 20 minutes (1200 seconds).
+    - Otherwise (fetching/embedding), it expires in 10 minutes (600 seconds) in case of sudden server crash.
     """
     key = f"embed:{project_id}:{patent_number}"
     try:
@@ -21,8 +22,10 @@ async def set_embed_status(project_id: str, patent_number: str, status: str):
             ttl = 86400
         elif status == "failed":
             ttl = 604800
+        elif status == "pending":
+            ttl = 1200
         else:
-            ttl = 7200
+            ttl = 600
 
         await redis_client.setex(key, ttl, status)
         logger.info(f"Set redis {key} = {status} (TTL: {ttl}s)")

@@ -44,6 +44,7 @@ class MappingEngineService:
         patent_number: str,
         project_id: str,
         user_id: str,
+        exclude_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Fast vector-based scoring that skips the LLM and instantly returns Y/P/N."""
         prior_art = normalize_patent_number(patent_number) or patent_number.strip()
@@ -53,10 +54,12 @@ class MappingEngineService:
             project_id=project_id,
             user_id=user_id,
             top_k=5,
+            exclude_ids=exclude_ids,
         )
 
         valid_payloads: List[Dict[str, Any]] = []
         snippets: List[str] = []
+        seen_texts = set()
         max_score = 0.0
         best_payload: Optional[Dict[str, Any]] = None
 
@@ -65,6 +68,17 @@ class MappingEngineService:
             payload = res.payload or {}
             if not patent_numbers_match(payload.get("patent_number", ""), patent_number, prior_art):
                 continue
+                
+            # TEXT DEDUPLICATION: Ignore chunks with identical text (e.g. repeated claims)
+            raw_text = payload.get("text", "").strip()
+            if not raw_text or raw_text in seen_texts:
+                continue
+            seen_texts.add(raw_text)
+                
+            # Inject Qdrant ID so we can ban it later if this payload wins
+            if hasattr(res, "id") and "qdrant_id" not in payload:
+                payload["qdrant_id"] = res.id
+                
             valid_payloads.append(payload)
             if score > max_score:
                 max_score = score
@@ -86,7 +100,7 @@ class MappingEngineService:
         if not valid_payloads or not best_payload:
             return {
                 "classification": "N",
-                "cited_passage": "Analysis deferred. Select this patent and click 'Create Chart' to run AI.",
+                "cited_passage": "Select this patent and click 'Create Chart' to run AI.",
                 "para_ref": "",
                 "fig_ref": "",
                 "rationale": "",
@@ -106,7 +120,7 @@ class MappingEngineService:
 
         return {
             "classification": classification,
-            "cited_passage": f"[Score: {max_score * 100:.1f}%] {cited_passage}\n\nAnalysis deferred. Select this patent and click 'Create Chart' to run AI for complete rationale.",
+            "cited_passage": f"[Score: {max_score * 100:.1f}%] {cited_passage}\n\nSelect this patent and click 'Create Chart' to run AI for complete rationale.",
             "para_ref": para_ref,
             "fig_ref": fig_ref,
             "rationale": "",
@@ -124,6 +138,7 @@ class MappingEngineService:
         user_id: str,
         saved_snippets: Optional[List[str]] = None,
         best_payload: Optional[Dict[str, Any]] = None,
+        exclude_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         prior_art = normalize_patent_number(patent_number) or patent_number.strip()
 
@@ -139,6 +154,7 @@ class MappingEngineService:
                 project_id=project_id,
                 user_id=user_id,
                 top_k=5,
+                exclude_ids=exclude_ids,
             )
 
             for res in results:
@@ -146,6 +162,11 @@ class MappingEngineService:
                 payload = res.payload or {}
                 if not patent_numbers_match(payload.get("patent_number", ""), patent_number, prior_art):
                     continue
+                    
+                # Inject Qdrant ID so we can ban it later if this payload wins
+                if hasattr(res, "id") and "qdrant_id" not in payload:
+                    payload["qdrant_id"] = res.id
+                    
                 valid_payloads.append(payload)
                 if score > max_score:
                     max_score = score

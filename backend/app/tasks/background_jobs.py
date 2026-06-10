@@ -20,6 +20,9 @@ from app.embedding.text_utils import normalize_patent_number
 
 logger = logging.getLogger(__name__)
 
+# Global semaphore to throttle concurrent matrix mapping jobs and protect DB/Qdrant
+MAPPING_SEMAPHORE = asyncio.Semaphore(5)
+
 # Dedicated engine for background threads to avoid session collision
 bg_engine = create_async_engine(
     settings.DATABASE_URL,
@@ -34,10 +37,16 @@ from opentelemetry import trace
 tracer = trace.get_tracer(__name__)
 
 @tracer.start_as_current_span("run_obviousness_mapping_task")
-async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
+async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID, target_patent_ids: list[UUID] = None):
     span = trace.get_current_span()
     span.set_attribute("project_id", str(project_id))
     span.set_attribute("claim_id", str(claim_id))
+    
+    # Throttle concurrency to protect connection pool
+    async with MAPPING_SEMAPHORE:
+        await _do_run_obviousness_mapping_task(project_id, claim_id, target_patent_ids)
+
+async def _do_run_obviousness_mapping_task(project_id: UUID, claim_id: UUID, target_patent_ids: list[UUID] = None):
     async with bg_session_maker() as db:
         try:
             res_proj = await db.execute(select(Project).where(Project.id == project_id))
@@ -55,14 +64,15 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
 
             # 1. Fetch reference patents
             # Only fetch patents that have successfully completed the embedding pipeline
-            res_pat = await db.execute(
-                select(Patent)
-                .where(
-                    Patent.project_id == project_id, 
-                    Patent.is_reference == True,
-                    Patent.fetch_status == "success"
-                )
+            stmt = select(Patent).where(
+                Patent.project_id == project_id, 
+                Patent.is_reference == True,
+                Patent.fetch_status == "success"
             )
+            if target_patent_ids:
+                stmt = stmt.where(Patent.id.in_(target_patent_ids))
+                
+            res_pat = await db.execute(stmt)
             references = res_pat.scalars().all()
             
             # 2. Fetch claim elements
@@ -89,6 +99,17 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                 await commit_with_retry(db)
                 
                 try:
+                    # Cache Check: Do we already have all mappings for this patent and claim?
+                    res_maps_check = await db.execute(
+                        select(Mapping).where(
+                            Mapping.claim_id == claim_id,
+                            Mapping.reference_patent_id == ref_id
+                        )
+                    )
+                    existing_mappings = res_maps_check.scalars().all()
+                    has_pending = any(m.classification == "Pending" for m in existing_mappings)
+                    is_mapped = bool(existing_mappings and len(existing_mappings) == len(elements) and not has_pending)
+                    
                     # Fetch patent metadata if still pending
                     if fetch_status == "pending":
                         data = await patent_fetch_service.fetch_patent(patent_number)
@@ -107,9 +128,8 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                         patent_abstract = data["abstract"] or ""
                         fetch_status = "success"
 
-                        # ✅ FIX (P0): Embed the prior-art patent into Qdrant so that
+                        # Embed the prior-art patent into Qdrant so that
                         # search_element_in_prior_art() can find relevant passages.
-                        # Without this, every element comparison returns empty results.
                         try:
                             from app.embedding.qdrant_service import embed_patent as _embed_patent
                             from app.services.get_structured_abstract import get_abstract
@@ -145,12 +165,10 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                 patent_number, embed_err
                             )
 
-                    else:
+                    elif not is_mapped:
                         # Patent already fetched (fetch_status == "success").
                         # Guard: verify vectors actually exist in Qdrant for this
-                        # project+user+patent. If not (e.g. the /embed step was
-                        # skipped, or old data was embedded with broken payloads),
-                        # re-fetch and re-embed now so the search will have results.
+                        # project+user+patent. If not, re-fetch and re-embed.
                         try:
                             from app.embedding.qdrant_service import (
                                 embed_patent as _embed_patent,
@@ -167,18 +185,9 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                 collection_name=_COLLECTION_NAME,
                                 scroll_filter=Filter(
                                     must=[
-                                        FieldCondition(
-                                            key="project_id",
-                                            match=MatchValue(value=str(project_id)),
-                                        ),
-                                        FieldCondition(
-                                            key="user_id",
-                                            match=MatchValue(value=user_id),
-                                        ),
-                                        FieldCondition(
-                                            key="patent_number",
-                                            match=MatchValue(value=canonical),
-                                        ),
+                                        FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
+                                        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                                        FieldCondition(key="patent_number", match=MatchValue(value=canonical)),
                                     ]
                                 ),
                                 limit=1,
@@ -226,18 +235,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                 patent_number, guard_err,
                             )
                         
-                    # Cache Check: Do we already have all mappings for this patent and claim?
-                    res_maps_check = await db.execute(
-                        select(Mapping).where(
-                            Mapping.claim_id == claim_id,
-                            Mapping.reference_patent_id == ref_id
-                        )
-                    )
-                    existing_mappings = res_maps_check.scalars().all()
-                    
-                    has_pending = any(m.classification == "Pending" for m in existing_mappings)
-                    
-                    if existing_mappings and len(existing_mappings) == len(elements) and not has_pending:
+                    if is_mapped:
                         logger.info(f"Step 2: Found {len(existing_mappings)} existing mappings for reference patent {patent_number}. Skipping LLM.")
                         
                         weighted_score = 0.0
@@ -265,6 +263,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                             
                         # Create fast similarity-based mappings for the Matrix UI
                         weighted_score = 0.0
+                        consumed_ids = []
                         for el in elements:
                             # Use fast Qdrant vector similarity to estimate Y/P/N instantly
                             search_text = f"{el.text}\nContext/Interpretation: {el.comment}" if getattr(el, "comment", None) else el.text
@@ -274,7 +273,12 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                 patent_number,
                                 str(project_id),
                                 user_id,
+                                exclude_ids=consumed_ids,
                             )
+                            
+                            # Track the consumed Qdrant ID so it is banned from the next elements
+                            if fast_comparison.get("best_payload") and fast_comparison["best_payload"].get("qdrant_id"):
+                                consumed_ids.append(fast_comparison["best_payload"]["qdrant_id"])
                             
                             classification = fast_comparison["classification"]
                             cited_passage_data = {
@@ -319,8 +323,7 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                                     fig_ref=fig_ref
                                 )
                                 db.add(mapping)
-                            await commit_with_retry(db)
-                            logger.info("Deferred mapping saved for claim %s and element %s", claim_id, el.id)
+                            logger.info("Deferred mapping staged for claim %s and element %s", claim_id, el.id)
                             
                             # Add score impact
                             impact = 0.0
@@ -329,6 +332,10 @@ async def run_obviousness_mapping_task(project_id: UUID, claim_id: UUID):
                             
                             logger.info(f"Score Calculation: Element {el.id} classified as '{classification}'. Impact factor: {impact}. Weight: {el.weight}.")
                             weighted_score += float(el.weight) * impact
+                            
+                        # Bulk commit all mappings for this patent at once to dramatically improve database performance
+                        await commit_with_retry(db)
+                        logger.info(f"Successfully bulk-committed all element mappings for patent {patent_number}.")
                         
                     # Normalize the score to be out of 100%
                     total_weight = sum(float(el.weight) for el in elements)
