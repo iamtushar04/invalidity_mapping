@@ -10,14 +10,6 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.session_tokens_used = 0
-        
-    def check_token_budget(self, anticipated_tokens: int = 4000):
-        if self.session_tokens_used + anticipated_tokens > settings.SESSION_TOKEN_BUDGET:
-            raise ValueError(
-                f"Session token budget exceeded! Used: {self.session_tokens_used}, "
-                f"Limit: {settings.SESSION_TOKEN_BUDGET}"
-            )
             
     async def chat_completion(
         self,
@@ -28,9 +20,6 @@ class LLMClient:
     ) -> str:
         # Route model based on reasoning request
         model = settings.LLM_MODEL_REASONING if use_reasoning else settings.LLM_MODEL_ROUTINE
-        
-        # Check token limits
-        self.check_token_budget()
         
         # Attempt completion with backoff retries
         for attempt in range(4):
@@ -45,11 +34,6 @@ class LLMClient:
                     max_tokens=settings.MAX_TOKENS_PER_CALL
                 )
                 
-                # Track token usages
-                usage = response.usage
-                if usage:
-                    self.session_tokens_used += usage.total_tokens
-                    
                 return response.choices[0].message.content
                 
             except Exception as e:

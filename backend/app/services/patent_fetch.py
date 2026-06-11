@@ -47,7 +47,7 @@ class PatentFetchService:
 
         return "\n\n".join(collected_paragraphs)
 
-    async def fetch_patent(self, patent_number: str) -> Dict[str, Any]:
+    async def fetch_patent(self, patent_number: str, skip_llm: bool = False) -> Dict[str, Any]:
         # Standardize search query format
 
         logger.info("Fetching google patent....")
@@ -89,22 +89,31 @@ class PatentFetchService:
                             }
                         }
 
-                        enriched = await enrich_patent_with_llm(raw_data)
                         assignees = data.get("assignees", [])
                         assignee = ", ".join(assignees) if isinstance(assignees, list) else assignees
 
-                        # Guard against LLM returning empty string or None
-                        structured_summary = enriched.get("structured_summary")
-                        if not isinstance(structured_summary, dict):
+                        if skip_llm:
                             structured_summary = {
                                 "core_inventive_concept": "",
                                 "problem_solution_mapping": {"problem": "", "solution": ""},
                                 "novelty_points": []
                             }
-
-                        claims = enriched.get("claims")
-                        if not isinstance(claims, list):
-                            claims = []
+                            claims = raw_data.get("claims", [])
+                        else:
+                            enriched = await enrich_patent_with_llm(raw_data)
+                            
+                            # Guard against LLM returning empty string or None
+                            structured_summary = enriched.get("structured_summary")
+                            if not isinstance(structured_summary, dict):
+                                structured_summary = {
+                                    "core_inventive_concept": "",
+                                    "problem_solution_mapping": {"problem": "", "solution": ""},
+                                    "novelty_points": []
+                                }
+    
+                            claims = enriched.get("claims")
+                            if not isinstance(claims, list):
+                                claims = []
                         return {
                             "patent_number": patent_number,
                             "title": data.get("title", ""),

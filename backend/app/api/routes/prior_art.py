@@ -390,3 +390,51 @@ async def list_reference_patents(
         select(Patent).where(Patent.project_id == project_id, Patent.is_reference == True)
     )
     return res_pat.scalars().all()
+
+@router.post("/{project_id}/retry-failed", status_code=status.HTTP_202_ACCEPTED)
+async def retry_failed_patents(
+    project_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # Verify project
+    res_proj = await db.execute(
+        select(Project).where(Project.id == project_id, Project.user_id == current_user.id)
+    )
+    project = res_proj.scalars().first()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+
+    # Find all failed reference patents for this project
+    res_pat = await db.execute(
+        select(Patent).where(
+            Patent.project_id == project_id,
+            Patent.is_reference == True,
+            Patent.fetch_status == "failed"
+        )
+    )
+    failed_patents = res_pat.scalars().all()
+
+    if not failed_patents:
+        return {"status": "none", "message": "No failed patents to retry.", "count": 0}
+
+    added_numbers = []
+    for patent in failed_patents:
+        patent.fetch_status = "pending"
+        added_numbers.append(patent.patent_number)
+        await set_embed_status(str(project_id), patent.patent_number, "pending")
+
+    db.add_all(failed_patents)
+    await db.commit()
+
+    if added_numbers:
+        background_tasks.add_task(
+            background_batch_embed,
+            str(project_id),
+            str(current_user.id),
+            added_numbers
+        )
+
+    return {"status": "queued", "message": f"Successfully re-queued {len(added_numbers)} failed patents.", "count": len(added_numbers)}
+

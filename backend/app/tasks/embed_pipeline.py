@@ -52,8 +52,8 @@ async def _pipeline_fetch_and_embed(project_id: str, user_id: str, patent_number
                 if "error" in raw_data or "error_message" in raw_data:
                     raise ValueError(f"Failed to fetch raw data for {patent_number}: {raw_data}")
 
-                # 1b. Fetch LLM enriched data (needed for Postgres DB)
-                enriched_data = await patent_fetch_service.fetch_patent(patent_number)
+                # 1b. Fetch data but SKIP the heavy LLM structured summary extraction for prior art
+                enriched_data = await patent_fetch_service.fetch_patent(patent_number, skip_llm=True)
             logger.info("Successfully fetched raw data for patent %s", patent_number)
             # Parse data out of the raw fetch results for Qdrant using background threads
             # This prevents the Python Event Loop from freezing during heavy HTML parsing!

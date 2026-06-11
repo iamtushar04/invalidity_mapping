@@ -5,7 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   FileText, CheckSquare, Layers, Database, Play,
   Table as TableIcon, FileDown, ArrowLeft, Plus,
-  Trash2, Loader2, Sparkles, AlertCircle, Check,
+  Trash2, Loader2, Sparkles, AlertCircle, Check, Copy,
   Edit3, ShieldAlert, LogOut, LayoutDashboard, ChevronLeft, ChevronRight
 } from "lucide-react";
 
@@ -736,6 +736,28 @@ export default function ProjectAnalysisPage() {
     }
   };
 
+  const handleRetryFailed = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/prior-art/${projectId}/retry-failed`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || "Failed to retry patents.");
+      }
+      const data = await res.json();
+      setUploadMsg(`Successfully re-queued ${data.count} failed patents in the background.`);
+      fetchPriorArt();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Active status polling loop
   // Phase 5: Obviousness Analysis & Matrix - Run analysis for all selected claims
   const handleRunAnalysisAll = async () => {
@@ -1362,7 +1384,66 @@ export default function ProjectAnalysisPage() {
             </div>
 
             <div className="bg-slate-950/20 border border-slate-800/80 rounded-2xl p-6">
-              <h3 className="font-bold mb-4">Ingested Reference Pool ({priorArtList?.length})</h3>
+              {(() => {
+                let successCount = 0;
+                let failedCount = 0;
+                let progressCount = 0;
+                
+                priorArtList?.forEach(art => {
+                  const rawStatus = embedStatuses[art?.patent_number] || art?.fetch_status || "unknown";
+                  const embedStatus = rawStatus.toLowerCase();
+                  if (embedStatus === "done" || embedStatus === "success") successCount++;
+                  else if (embedStatus === "failed") failedCount++;
+                  else if (["pending", "fetching", "embedding"].includes(embedStatus)) progressCount++;
+                });
+
+                return (
+                  <div className="flex justify-between items-center mb-4 flex-wrap gap-4">
+                    <h3 className="font-bold">Ingested Reference Pool ({priorArtList?.length})</h3>
+                    <div className="flex items-center gap-2 text-xs font-mono font-bold">
+                      <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-3 py-1.5 rounded-lg">
+                        {successCount} Success
+                      </span>
+                      {failedCount > 0 ? (
+                        <div className="flex items-center gap-1 bg-rose-500/10 border border-rose-500/20 rounded-lg p-0.5">
+                          <button 
+                            onClick={handleRetryFailed}
+                            disabled={loading}
+                            title="Click to rerun failed cases"
+                            className="hover:bg-rose-500/20 text-rose-400 px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                          >
+                            {failedCount} Failed
+                          </button>
+                          <div className="w-px h-4 bg-rose-500/20"></div>
+                          <button
+                            onClick={() => {
+                              const failed = priorArtList?.filter(art => {
+                                const rawStatus = embedStatuses[art?.patent_number] || art?.fetch_status || "unknown";
+                                return rawStatus.toLowerCase() === "failed";
+                              }).map(art => art?.patent_number) || [];
+                              if (failed.length > 0) {
+                                navigator.clipboard.writeText(failed.join(","));
+                                setUploadMsg(`Copied ${failed.length} failed patents to clipboard.`);
+                              }
+                            }}
+                            title="Copy failed patent numbers"
+                            className="hover:bg-rose-500/20 text-rose-400 px-2 py-1 rounded transition-colors"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="bg-slate-800/50 text-slate-500 border border-slate-800 px-3 py-1.5 rounded-lg">
+                          0 Failed
+                        </span>
+                      )}
+                      <span className="bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-3 py-1.5 rounded-lg">
+                        {progressCount} In Progress
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {priorArtList?.length === 0 ? (
                 <p className="text-sm text-slate-500 text-center py-6">No references added yet.</p>
